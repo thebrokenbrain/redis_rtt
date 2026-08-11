@@ -92,9 +92,12 @@ class CountingClient implements ClientInterface {
 
   /**
    * {@inheritdoc}
+   *
+   * Says so out loud: instrumentation is not free and should not be left on
+   * fleet-wide, so it belongs in any report that names the client.
    */
   public function getName() {
-    return $this->inner->getName();
+    return $this->inner->getName() . ' (instrumented)';
   }
 
   /**

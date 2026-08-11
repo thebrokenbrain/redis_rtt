@@ -4,30 +4,35 @@ declare(strict_types=1);
 
 namespace Drupal\redis_rtt\Client;
 
-use Drupal\redis\Client\PhpRedis;
 use Drupal\redis\Client\PhpRedisFactory;
 use Drupal\redis\ClientInterface;
 
 /**
- * PhpRedis factory that keeps the per-request handshake down to zero commands.
+ * PhpRedis factory that configures the connection the stock one leaves bare.
  *
- * \Drupal\redis\Client\PhpRedisFactory calls pconnect() without credentials and
- * then issues AUTH (and SELECT, when a database is configured) as ordinary
- * commands. With a persistent connection the socket survives between requests
- * but those commands do not: every single request re-sends AUTH and SELECT,
- * paying a full round trip each on a cross-AZ ElastiCache primary before any
- * useful work happens.
+ * \Drupal\redis\Client\PhpRedisFactory calls pconnect() with nothing but host
+ * and port, leaving every other parameter at its default. The consequential one
+ * is read_timeout, whose default is *unlimited*: a connection dropped by a
+ * failover - the normal outcome of a multi-AZ ElastiCache failover - blocks the
+ * PHP-FPM worker until the FPM request timeout rather than failing fast. Under
+ * load that turns a thirty-second failover into an exhausted worker pool and
+ * a site down for minutes, with nothing in the symptoms pointing at Redis.
  *
- * Passing the credentials in pconnect()'s stream context instead makes phpredis
- * authenticate as part of establishing the connection, so a reused connection
- * sends nothing. SELECT is skipped when phpredis already knows the connection
- * is on the right database.
+ * So this is robustness rather than speed. It changes nothing when Redis is
+ * healthy, and it does not appear in any throughput measurement.
  *
- * It also wires up the connection parameters that matter when the primary fails
- * over to the other AZ - connect timeout, read timeout, retry interval and TCP
- * keepalive - none of which the stock factory sets, leaving them at PHP
- * defaults (no read timeout at all, so a silently dropped connection hangs the
- * worker until the FPM request timeout).
+ * Credentials are handed to pconnect()'s stream context rather than sent as an
+ * AUTH command, which is where phpredis wants them and keeps them out of the
+ * command stream. Note, though, that this does *not* remove the per-request
+ * AUTH, contrary to what one might expect: the socket survives between requests
+ * but PHP's static state does not, so the client is rebuilt and pconnect()
+ * called again on every request, and phpredis reauthenticates even when it
+ * reuses the socket. Measured over 101 authenticated requests against a
+ * password-protected Redis: one new connection per fifty requests - the socket
+ * really is reused - but two AUTHs per request either way.
+ *
+ * SELECT is skipped when phpredis already reports the connection on the wanted
+ * database, which costs no round trip to check.
  *
  * Recognised keys in $settings['redis.connection'], on top of the stock ones:
  *   - tls: (bool) wrap the connection in TLS, for in-transit encryption.
@@ -35,7 +40,9 @@ use Drupal\redis\ClientInterface;
  *   - read_timeout: (float) read timeout in seconds, default 1.0.
  *   - retry_interval: (int) milliseconds between connect retries, default 100.
  *   - persistent_id: (string) connection pool identifier.
+ *   - user: (string) ACL username, for Redis 6 style authentication.
  *   - verify_peer: (bool) verify the TLS peer, default TRUE when tls is on.
+ *   - count_commands: (bool) wrap the client in a round-trip counter.
  */
 class FastPhpRedisFactory extends PhpRedisFactory {
 
@@ -132,7 +139,7 @@ class FastPhpRedisFactory extends PhpRedisFactory {
       $redis->setOption(\Redis::OPT_TCP_KEEPALIVE, 1);
     }
 
-    return $this->instrument(new PhpRedis($redis), $settings);
+    return $this->instrument(new FastPhpRedis($redis), $settings);
   }
 
   /**
