@@ -50,12 +50,17 @@ services:
 
   # ---------------------------------------------------------------------------
   # Measurement. Off unless $settings['redis_rtt_report'] is TRUE.
+  #
+  # A middleware, at a priority that puts it outside http_middleware.page_cache
+  # (200). As a response subscriber the header ended up *inside* the cached
+  # response: served to later requests that never made those round trips, and
+  # outliving the setting that produced it.
   # ---------------------------------------------------------------------------
   redis_rtt.round_trip_report:
-    class: Drupal\redis_rtt\EventSubscriber\RoundTripReportSubscriber
+    class: Drupal\redis_rtt\StackMiddleware\RoundTripReportMiddleware
     arguments: ['@redis_rtt.command_buffer']
     tags:
-      - { name: event_subscriber }
+      - { name: http_middleware, priority: 1000 }
 
   # The stock connection with instrumentation attached, for baselines.
   redis_rtt.redis_factory.counting:
