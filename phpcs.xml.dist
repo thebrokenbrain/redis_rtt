@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ruleset name="redis_rtt">
+    <description>Drupal and DrupalPractice standards for the redis_rtt module.</description>
+
+    <file>.</file>
+
+    <arg name="extensions" value="php,module,inc,install,yml"/>
+    <arg name="colors"/>
+    <arg value="sp"/>
+
+    <rule ref="Drupal"/>
+    <rule ref="DrupalPractice"/>
+
+    <exclude-pattern>vendor/</exclude-pattern>
+</ruleset>

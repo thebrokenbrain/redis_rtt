@@ -1,0 +1,127 @@
+<?php
+
+/**
+ * @file
+ * Install and runtime requirement checks for the Redis RTT optimizer.
+ */
+
+declare(strict_types=1);
+
+use Drupal\Core\Site\Settings;
+
+/**
+ * Implements hook_requirements().
+ *
+ * Enabling this module changes nothing on its own: every optimisation is
+ * switched on from settings.php. That is deliberate - the cache backend has to
+ * be selectable before the container exists - but it means a site can sit with
+ * the module enabled and none of it active, which is worth saying out loud on
+ * the status report.
+ *
+ * Typed with @phpstan-return rather than @return: DrupalPractice objects to a
+ * hook implementation restating the hook's documented signature, but PHPStan
+ * still needs the array shape.
+ *
+ * @phpstan-return array<string, array<string, mixed>>
+ */
+function redis_rtt_requirements(string $phase): array {
+  $requirements = [];
+
+  if ($phase !== 'runtime') {
+    return $requirements;
+  }
+
+  // --- The cache backend --------------------------------------------------
+  $backend = Settings::get('cache')['default'] ?? NULL;
+  $backend_active = $backend === 'cache.backend.redis_rtt';
+  $requirements['redis_rtt_backend'] = [
+    'title' => t('Redis RTT: cache backend'),
+    'value' => $backend_active
+      ? t('Active')
+      : t('Not in use (current: @backend)', ['@backend' => $backend ?? t('database')]),
+    'severity' => $backend_active ? REQUIREMENT_OK : REQUIREMENT_WARNING,
+    'description' => $backend_active ? NULL : t(
+      'The deferred cache backend is where most of the saving comes from. Set <code>$settings["cache"]["default"] = "cache.backend.redis_rtt";</code> in settings.php.'
+    ),
+  ];
+
+  // --- APCu ---------------------------------------------------------------
+  $apcu = function_exists('apcu_fetch') && filter_var(ini_get('apc.enabled'), FILTER_VALIDATE_BOOL);
+  $requirements['redis_rtt_apcu'] = [
+    'title' => t('Redis RTT: APCu'),
+    'value' => $apcu ? t('Available') : t('Not available'),
+    'severity' => $apcu ? REQUIREMENT_OK : REQUIREMENT_WARNING,
+    'description' => $apcu ? NULL : t(
+      'Without APCu the render cache redirect shortcut and the cache tag warm set still behave correctly, but nothing they learn survives the request, so they save nothing. Install and enable the APCu extension.'
+    ),
+  ];
+
+  // --- The service overrides ----------------------------------------------
+  // Checked by asking the container what it actually built, rather than by
+  // parsing settings: what matters is the wiring that ended up in effect.
+  $overrides = [
+    'variation_cache_factory' => [
+      'class' => 'Drupal\redis_rtt\Cache\RedirectShortcutVariationCacheFactory',
+      'label' => t('Render cache redirect shortcut'),
+    ],
+    'cache_tags.invalidator.checksum' => [
+      'class' => 'Drupal\redis_rtt\Cache\PreloadingRedisCacheTagsChecksum',
+      'label' => t('Batched cache tag checksums'),
+    ],
+    'lock' => [
+      'class' => 'Drupal\redis_rtt\Lock\LuaRedisLock',
+      'label' => t('Single round-trip locks'),
+    ],
+  ];
+  $missing = [];
+  foreach ($overrides as $service_id => $info) {
+    if (!\Drupal::hasService($service_id) || !is_a(\Drupal::service($service_id), $info['class'])) {
+      $missing[] = $info['label'];
+    }
+  }
+  $requirements['redis_rtt_services'] = [
+    'title' => t('Redis RTT: service overrides'),
+    'value' => $missing
+      ? t('@count of @total inactive', ['@count' => count($missing), '@total' => count($overrides)])
+      : t('All active'),
+    'severity' => $missing ? REQUIREMENT_WARNING : REQUIREMENT_OK,
+    'description' => $missing ? t(
+      'Inactive: @list. Add the module\'s service overrides to settings.php: <code>$settings["container_yamls"][] = "modules/custom/redis_rtt/redis_rtt.services.example.yml";</code>',
+      ['@list' => implode(', ', $missing)]
+    ) : NULL,
+  ];
+
+  // --- The connection -----------------------------------------------------
+  $interface = Settings::get('redis.connection')['interface'] ?? NULL;
+  $persistent = !empty(Settings::get('redis.connection')['persistent']);
+  $connection_notes = [];
+  if (!$persistent) {
+    $connection_notes[] = t('Persistent connections are off. Every request pays a fresh TCP (and TLS) handshake, which is several round trips before any work happens.');
+  }
+  if ($interface !== 'FastPhpRedis') {
+    $connection_notes[] = t('The connection is not using FastPhpRedis, so no read timeout is configured. The PHP default is unlimited, which means a connection dropped by a failover blocks the worker until the FPM request timeout.');
+  }
+  $requirements['redis_rtt_connection'] = [
+    'title' => t('Redis RTT: Redis connection'),
+    'value' => $connection_notes ? t('Suboptimal') : t('Configured'),
+    'severity' => $connection_notes ? REQUIREMENT_WARNING : REQUIREMENT_OK,
+    'description' => $connection_notes ? [
+      '#theme' => 'item_list',
+      '#items' => $connection_notes,
+    ] : NULL,
+  ];
+
+  // --- Instrumentation ----------------------------------------------------
+  // A warning rather than a note: leaving it on fleet-wide keeps every query of
+  // every request in memory.
+  if (Settings::get('redis_rtt_report', FALSE)) {
+    $requirements['redis_rtt_report'] = [
+      'title' => t('Redis RTT: round-trip reporting'),
+      'value' => t('Enabled'),
+      'severity' => REQUIREMENT_WARNING,
+      'description' => t('The X-Redis-RTT response header is being emitted and the database query log is being kept in memory for every request. Intended for a canary task or a load test, not for the whole fleet. Unset <code>$settings["redis_rtt_report"]</code> when finished measuring.'),
+    ];
+  }
+
+  return $requirements;
+}

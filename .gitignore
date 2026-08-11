@@ -1,0 +1,8 @@
+# Development dependencies are installed by the site, not by the module.
+/vendor/
+/composer.lock
+
+# Local overrides of the shipped tool configuration.
+/phpcs.xml
+/phpstan.neon
+/phpunit.xml

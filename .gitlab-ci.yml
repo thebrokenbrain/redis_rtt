@@ -1,0 +1,26 @@
+# Drupal.org GitLab CI.
+# https://project.pages.drupalcode.org/gitlab_templates/
+include:
+  - project: $_GITLAB_TEMPLATES_REPO
+    ref: $_GITLAB_TEMPLATES_REF
+    file:
+      - '/includes/include.drupalci.main.yml'
+      - '/includes/include.drupalci.variables.yml'
+      - '/includes/include.drupalci.workflows.yml'
+
+variables:
+  OPT_IN_TEST_NEXT_MAJOR: '1'
+  OPT_IN_TEST_PREVIOUS_MINOR: '1'
+  # The unit tests are the ones that run everywhere. The kernel tests need a
+  # reachable Redis and skip themselves without one.
+  _PHPUNIT_EXTRA: '--group redis_rtt'
+
+phpunit:
+  variables:
+    # Give the kernel tests a Redis to talk to. Without these they skip, which
+    # is a pass but proves nothing.
+    REDIS_HOST: redis
+    REDIS_PORT: '6379'
+  services:
+    - name: redis:7-alpine
+      alias: redis

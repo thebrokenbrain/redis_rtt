@@ -1,0 +1,66 @@
+# Service overrides for the Redis RTT optimizer.
+#
+# These replace core and redis services, so they have to be loaded through
+# settings.php rather than the module's own services.yml:
+#
+#   $settings['container_yamls'][] = 'modules/custom/redis_rtt/redis_rtt.services.example.yml';
+#
+# Load this AFTER redis' own example.services.yml if you use that one - the
+# entries here supersede it and it must not win the override race.
+#
+# Every block is independent. Comment out anything you do not want yet; the
+# recommended rollout order is documented in README.md.
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # 1. Cache tag checksums resolved in one MGET instead of one per tag group.
+  #
+  # Replaces the redis module's RedisCacheTagsChecksum. Pure win, no behaviour
+  # change: it only batches lookups that were already going to happen.
+  # ---------------------------------------------------------------------------
+  cache_tags.invalidator.checksum:
+    class: Drupal\redis_rtt\Cache\PreloadingRedisCacheTagsChecksum
+    arguments: ['@redis.factory']
+    tags:
+      - { name: cache_tags_invalidator }
+
+  # ---------------------------------------------------------------------------
+  # 2. Locks with single-round-trip release and extend.
+  #
+  # Replaces the redis module's RedisLock (WATCH/GET/MULTI/EXEC = 3 round trips
+  # per release) with the standard Lua compare-and-swap.
+  # ---------------------------------------------------------------------------
+  lock:
+    class: Drupal\Core\Lock\LockBackendInterface
+    factory: ['@redis_rtt.lock.factory', get]
+
+  lock.persistent:
+    class: Drupal\Core\Lock\LockBackendInterface
+    factory: ['@redis_rtt.lock.factory', get]
+    arguments: [true]
+
+  # ---------------------------------------------------------------------------
+  # 3. Render / Dynamic Page Cache / access policy lookups that skip the cache
+  #    redirect hop on a hit.
+  #
+  # This is the big one for authenticated traffic. Set
+  # $settings['redis_rtt_redirect_shortcut'] = FALSE to disable at runtime without
+  # editing this file.
+  # ---------------------------------------------------------------------------
+  variation_cache_factory:
+    class: Drupal\redis_rtt\Cache\RedirectShortcutVariationCacheFactory
+    arguments: ['@request_stack', '@cache_factory', '@cache_contexts_manager']
+
+  # ---------------------------------------------------------------------------
+  # 4. Coalesced "last write timestamp" markers for the chained-fast bins
+  #    (bootstrap, config, discovery).
+  #
+  # Only worth enabling once the rest is in place; it matters most for cache
+  # rebuilds, cron and config imports rather than steady-state page serving.
+  # ---------------------------------------------------------------------------
+  # cache.backend.chainedfast:
+  #   class: Drupal\redis_rtt\Cache\CoalescingChainedFastBackendFactory
+  #   arguments: ['@settings']
+  #   calls:
+  #     - [setContainer, ['@service_container']]

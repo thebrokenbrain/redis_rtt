@@ -1,0 +1,64 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Shared write buffer. Every deferred Redis write from every bin lands here
+  # and is flushed as a single pipeline at the end of the request.
+  # ---------------------------------------------------------------------------
+  redis_rtt.command_buffer:
+    class: Drupal\redis_rtt\Redis\CommandBuffer
+    arguments: ['@redis.factory', '@settings']
+
+  # ---------------------------------------------------------------------------
+  # Cache backend factory. Enable in settings.php with:
+  #   $settings['cache']['default'] = 'cache.backend.redis_rtt';
+  # ---------------------------------------------------------------------------
+  cache.backend.redis_rtt:
+    class: Drupal\redis_rtt\Cache\DeferredCacheBackendFactory
+    arguments:
+      - '@redis.factory'
+      - '@cache_tags.invalidator.checksum'
+      - '@serialization.phpserialize'
+      - '@redis_rtt.command_buffer'
+      - '@settings'
+
+  # ---------------------------------------------------------------------------
+  # Chained-fast factory that coalesces the "last write timestamp" writes.
+  # Enable by overriding cache.backend.chainedfast, see
+  # redis_rtt.services.example.yml.
+  # ---------------------------------------------------------------------------
+  cache.backend.redis_rtt_chainedfast:
+    class: Drupal\redis_rtt\Cache\CoalescingChainedFastBackendFactory
+    arguments: ['@settings']
+    calls:
+      - [setContainer, ['@service_container']]
+
+  # ---------------------------------------------------------------------------
+  # Connection factory that keeps AUTH/SELECT off the per-request path.
+  # Select it with $settings['redis.connection']['interface'] = 'FastPhpRedis';
+  # ---------------------------------------------------------------------------
+  redis_rtt.redis_factory.phpredis:
+    class: Drupal\redis_rtt\Client\FastPhpRedisFactory
+    tags:
+      - { name: redis_client_factory, priority: 30 }
+
+  # ---------------------------------------------------------------------------
+  # Lock factory using single-round-trip Lua compare-and-swap.
+  # Enable by overriding the lock services, see redis_rtt.services.example.yml.
+  # ---------------------------------------------------------------------------
+  redis_rtt.lock.factory:
+    class: Drupal\redis_rtt\Lock\LuaLockFactory
+    arguments: ['@redis.factory']
+
+  # ---------------------------------------------------------------------------
+  # Measurement. Off unless $settings['redis_rtt_report'] is TRUE.
+  # ---------------------------------------------------------------------------
+  redis_rtt.round_trip_report:
+    class: Drupal\redis_rtt\EventSubscriber\RoundTripReportSubscriber
+    arguments: ['@redis_rtt.command_buffer']
+    tags:
+      - { name: event_subscriber }
+
+  # The stock connection with instrumentation attached, for baselines.
+  redis_rtt.redis_factory.counting:
+    class: Drupal\redis_rtt\Client\CountingPhpRedisFactory
+    tags:
+      - { name: redis_client_factory, priority: -10 }

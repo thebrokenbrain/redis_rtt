@@ -1,0 +1,18 @@
+# Assumes phpstan/extension-installer, which is what drupal/core-dev pulls in
+# and what the GitLab CI templates use, so phpstan-drupal and the deprecation
+# rules register themselves. Adding them under `includes` on top of that makes
+# PHPStan complain about duplicate includes.
+parameters:
+    level: 6
+    paths:
+        - .
+    excludePaths:
+        - vendor/*
+    ignoreErrors:
+        # \Drupal\redis\ClientInterface is a __call() facade over phpredis:
+        # every Redis command is a magic method, and no amount of annotation
+        # makes them statically resolvable. The redis module itself has the
+        # same situation.
+        -
+            identifier: method.notFound
+            message: '#Call to an undefined method Drupal\\redis\\ClientInterface::#'
