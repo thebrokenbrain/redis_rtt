@@ -22,7 +22,14 @@ use Symfony\Component\HttpKernel\HttpKernelInterface;
  *
  * Emits, when enabled:
  *   X-Redis-RTT: redis-trips=41; redis-cmds=180; redis-ms=27.4; db-queries=23;
- *                db-ms=14.1; buffer-pipelines=1; buffer-deduped=12
+ *                db-ms=14.1; buffer-pipelines=0; buffer-pending=31;
+ *                buffer-deduped=12
+ *
+ * Note buffer-pipelines: the header is built here, on the way out of the
+ * kernel, and the buffered writes are sent from a shutdown function after
+ * that. A normal request therefore reports zero pipelines and a non-empty
+ * buffer-pending; anything above zero means an intermediate flush was forced
+ * by redis_rtt_max_pending_writes, on the critical path.
  *
  * A middleware rather than a response subscriber, and deliberately so. As a
  * subscriber this ran inside the page cache, which meant the header was stored
