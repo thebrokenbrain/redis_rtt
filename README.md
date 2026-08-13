@@ -121,9 +121,16 @@ $settings['bootstrap_container_definition']['services']['redis.factory']['class'
 | `redis_rtt_tag_warmset_limit` | `400` | Maximum cache tags preloaded in one `MGET`. |
 | `redis_rtt_tag_warmset_min_hits` | `3` | Requests a tag must appear in before it is preloaded. |
 | `redis_rtt_report` | `FALSE` | Emit the `X-Redis-RTT` measurement header. |
+| `redis_rtt_report_top_commands` | `FALSE` | Add `X-Redis-RTT-Commands` with the per-command breakdown. |
+| `redis_rtt_log_errors` | `FALSE` | Warn through the PHP log when a buffered flush fails, instead of swallowing it. Floods the log if Redis is down. |
 
 The connection accepts these on top of the redis module's own: `tls`, `timeout`,
 `read_timeout`, `retry_interval`, `persistent_id`, `user`, `verify_peer`.
+
+`redis_rtt_report` only emits the header; the `redis-trips`, `redis-cmds` and
+`redis-ms` fields are filled in by the counting client, which is a separate
+switch under a different prefix: `$settings['redis.connection']['count_commands']`.
+They are separate because the header is cheap and the counter is not.
 
 ### Rolling out
 
