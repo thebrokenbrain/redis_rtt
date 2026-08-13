@@ -38,7 +38,7 @@ use Drupal\redis\ClientFactory as RedisClientFactory;
  * Requires the module's namespace to be registered in settings.php before the
  * bootstrap container is built:
  * @code
- * $class_loader->addPsr4('Drupal\\redis_rtt\\', __DIR__ . '/../../modules/custom/redis_rtt/src');
+ * $class_loader->addPsr4('Drupal\\redis_rtt\\', __DIR__ . '/../../modules/contrib/redis_rtt/src');
  * @endcode
  *
  * @see \Drupal\redis_rtt\Client\FastPhpRedisFactory

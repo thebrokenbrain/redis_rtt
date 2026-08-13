@@ -3,7 +3,7 @@
 # These replace core and redis services, so they have to be loaded through
 # settings.php rather than the module's own services.yml:
 #
-#   $settings['container_yamls'][] = 'modules/custom/redis_rtt/redis_rtt.services.example.yml';
+#   $settings['container_yamls'][] = 'modules/contrib/redis_rtt/redis_rtt.services.example.yml';
 #
 # Load this AFTER redis' own example.services.yml if you use that one - the
 # entries here supersede it and it must not win the override race.
