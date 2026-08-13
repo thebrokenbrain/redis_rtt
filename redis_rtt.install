@@ -86,7 +86,7 @@ function redis_rtt_requirements(string $phase): array {
       : t('All active'),
     'severity' => $missing ? REQUIREMENT_WARNING : REQUIREMENT_OK,
     'description' => $missing ? t(
-      'Inactive: @list. Add the module\'s service overrides to settings.php: <code>$settings["container_yamls"][] = "modules/custom/redis_rtt/redis_rtt.services.example.yml";</code>',
+      'Inactive: @list. Add the module\'s service overrides to settings.php: <code>$settings["container_yamls"][] = "modules/contrib/redis_rtt/redis_rtt.services.example.yml";</code>',
       ['@list' => implode(', ', $missing)]
     ) : NULL,
   ];
