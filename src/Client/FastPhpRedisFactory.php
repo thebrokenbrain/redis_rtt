@@ -169,11 +169,18 @@ class FastPhpRedisFactory extends PhpRedisFactory {
       }
     }
 
-    // SELECT costs a round trip and is almost never needed: ElastiCache uses
-    // database 0 and cluster mode does not support others at all. Skip it when
-    // phpredis already has the connection on the requested database.
+    // SELECT unconditionally whenever a database is configured, exactly as the
+    // stock factory does. Skipping it on the strength of ::getDbNum() looked
+    // like a free round trip and is not: phpredis resets its own bookkeeping to
+    // 0 on every pconnect() while the pooled socket stays on whatever database
+    // it was left on, so the comparison reports 0 == 0 and sends nothing. Two
+    // sites sharing an FPM pool and a Redis host - a multisite, or two vhosts -
+    // then read and write each other's databases, which is a site serving
+    // another site's data. Verified against phpredis 6.3.0, where after a
+    // select(5) a fresh pconnect() reports getDbNum() = 0 while CLIENT INFO
+    // reports db=5.
     $base = $settings['base'] ?? NULL;
-    if ($base !== NULL && (int) $base !== static::currentDatabase($redis)) {
+    if ($base !== NULL) {
       $redis->select((int) $base);
     }
 
@@ -241,20 +248,6 @@ class FastPhpRedisFactory extends PhpRedisFactory {
       $supported = (new \ReflectionMethod(\Redis::class, 'pconnect'))->getNumberOfParameters() >= 7;
     }
     return $supported;
-  }
-
-  /**
-   * Returns the database phpredis believes the connection is on.
-   *
-   * Answered from phpredis' own bookkeeping, so it costs no round trip. Returns
-   * -1 when it cannot be determined, which forces an explicit SELECT.
-   */
-  protected static function currentDatabase(\Redis $redis): int {
-    $db = $redis->getDbNum();
-    // Documented as returning int, but phpredis returns FALSE on a connection
-    // that has gone away, so the check is not as redundant as it looks.
-    // @phpstan-ignore-next-line
-    return is_int($db) ? $db : -1;
   }
 
 }

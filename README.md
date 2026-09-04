@@ -61,7 +61,10 @@ for further information.
 
 Enabling the module on its own changes nothing. Every optimisation is switched
 on from `settings.php`, because the cache backend has to be selectable before
-the service container exists. See Configuration.
+the service container exists. See Configuration. That includes the connection:
+this module's client factory is registered below the redis module's own, so an
+install that names no `interface` keeps the client, the timeouts and the
+connection pool it had.
 
 
 ## Configuration
@@ -84,12 +87,19 @@ $class_loader->addPsr4(
 $settings['redis.connection']['interface'] = 'FastPhpRedis';
 $settings['redis.connection']['persistent'] = TRUE;
 $settings['cache']['default'] = 'cache.backend.redis_rtt';
+$settings['container_yamls'][] = 'modules/contrib/redis_rtt/redis_rtt.services.yml';
 $settings['container_yamls'][] = 'modules/contrib/redis_rtt/redis_rtt.services.example.yml';
 ```
 
 The `addPsr4()` call is needed because the classes named below are loaded
 before Drupal registers module namespaces. `$class_loader` is in scope inside
 `settings.php`.
+
+Both services files are listed because `settings.php` is read whether or not the
+module is installed. The overrides in the example file refer to services this
+module defines, so without its own services file alongside them, uninstalling the
+module - or an initial install, where settings are read before the module is
+enabled - fails with a `ServiceNotFoundException`.
 
 ### Service overrides
 
@@ -127,10 +137,23 @@ $settings['bootstrap_container_definition']['services']['redis.factory']['class'
 The connection accepts these on top of the redis module's own: `tls`, `timeout`,
 `read_timeout`, `retry_interval`, `persistent_id`, `user`, `verify_peer`.
 
+`read_timeout` defaults to 1 second where stock phpredis waits forever, which is
+the point: an unbounded read turns a failover into an outage. But it is a limit
+on *every* reply, including ones you are deliberately waiting for.
+`RedisQueue::claimItem()` blocks on `brpoplpush` for up to 30 seconds and does
+not catch the exception, so a site using the redis module's queue backend must
+raise `read_timeout` above that queue's own timeout. Selecting `FastPhpRedis` is
+therefore an explicit choice: installing this module does not make it for you.
+
 `redis_rtt_report` only emits the header; the `redis-trips`, `redis-cmds` and
 `redis-ms` fields are filled in by the counting client, which is a separate
 switch under a different prefix: `$settings['redis.connection']['count_commands']`.
-They are separate because the header is cheap and the counter is not.
+They are separate because they cost different things, but neither is free.
+`redis_rtt_report` calls `Database::startLog()`, which makes core run a full
+`debug_backtrace()` for every SQL statement and hold the query, its arguments and
+its caller until the header is built - measured at roughly 2.4x the time over
+2000 queries, and about 400 bytes retained per query. The counting client is
+more expensive still. Both belong on a canary instance, not fleet-wide.
 
 ### Rolling out
 

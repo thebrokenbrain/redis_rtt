@@ -34,11 +34,19 @@ services:
   # ---------------------------------------------------------------------------
   # Connection factory that keeps AUTH/SELECT off the per-request path.
   # Select it with $settings['redis.connection']['interface'] = 'FastPhpRedis';
+  #
+  # The priority is deliberately below the redis module's own 20. When no
+  # interface is named, \Drupal\redis\ClientFactory takes the highest-priority
+  # factory it can find, so a higher number here would mean that merely
+  # installing this module swapped the client and applied this module's
+  # timeouts - including a bounded read timeout, which is right for a cache read
+  # and wrong for RedisQueue::claimItem()'s blocking brpoplpush(). Choosing this
+  # client stays an explicit act.
   # ---------------------------------------------------------------------------
   redis_rtt.redis_factory.phpredis:
     class: Drupal\redis_rtt\Client\FastPhpRedisFactory
     tags:
-      - { name: redis_client_factory, priority: 30 }
+      - { name: redis_client_factory, priority: 10 }
 
   # ---------------------------------------------------------------------------
   # Lock factory using single-round-trip Lua compare-and-swap.
