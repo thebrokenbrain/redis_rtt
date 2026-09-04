@@ -311,4 +311,43 @@ class PreloadingRedisCacheTagsChecksumTest extends UnitTestCase {
     $this->assertSame(1, $this->client->roundTrips);
   }
 
+  /**
+   * A speculative count must not answer for its tag once it has aged out.
+   *
+   * The warm set fetches counts for tags nobody has asked for yet. In a request
+   * that lasts milliseconds that is free batching. In a cron run, a queue
+   * worker or a migration it is not: an editor saving content elsewhere would
+   * go unseen for the rest of the run, and the process would keep validating
+   * cache entries against a count read minutes earlier.
+   *
+   * @covers ::getTagInvalidationCounts
+   */
+  public function testAnAgedSpeculativeCountIsNotTrusted(): void {
+    new Settings([
+      'redis_rtt_tag_warmset_min_hits' => 2,
+      // Every speculative count is stale by the time it is asked for.
+      'redis_rtt_tag_warmset_ttl' => 0.0,
+      // Pins the key prefix so the test can stand in for another process.
+      'cache_prefix' => 'drupal',
+    ]);
+    $key = 'drupal:cachetags:node:1';
+    $this->client->data[$key] = 3;
+    $this->client->data['drupal:cachetags:node:2'] = 1;
+
+    $provider = $this->provider();
+    // Registration is the deterministic way a tag becomes speculative: a cache
+    // read hands the backend's tags over, and the next lookup drags them along.
+    $provider->registerCacheTagsForPreload(['node:1']);
+    $provider->getCurrentChecksum(['node:2']);
+
+    // Another process invalidates node:1 while this one is still running.
+    $this->client->data[$key] = 4;
+
+    $this->assertSame(
+      4,
+      (int) $provider->getCurrentChecksum(['node:1']),
+      'An aged speculative count must be re-read, not served.',
+    );
+  }
+
 }

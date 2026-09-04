@@ -93,6 +93,27 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
   protected array $seenTags = [];
 
   /**
+   * Counts fetched before anyone asked for them, with the moment they were.
+   *
+   * Not the static tag cache: a count nobody requested must not answer for its
+   * tag indefinitely. ::getTagInvalidationCounts() promotes one from here only
+   * when a caller genuinely asks for that tag and the count is younger than
+   * ::$speculativeTtl.
+   *
+   * @var array<string, array{count: int, at: float}>
+   */
+  protected array $speculative = [];
+
+  /**
+   * How long a speculatively fetched count may answer for its tag, in seconds.
+   *
+   * Sized for a web request, which is the case the batching exists for. A
+   * longer-lived process re-reads instead, which is the whole point: that is
+   * where an invalidation from another process has time to happen.
+   */
+  protected float $speculativeTtl;
+
+  /**
    * Whether the learned set has already been folded into a lookup.
    */
   protected bool $warmSetUsed = FALSE;
@@ -138,6 +159,7 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
     $this->store = $store ?? new ApcuShortcutStore('cachetags');
     $this->limit = (int) Settings::get('redis_rtt_tag_warmset_limit', 400);
     $this->minHits = (int) Settings::get('redis_rtt_tag_warmset_min_hits', 3);
+    $this->speculativeTtl = (float) Settings::get('redis_rtt_tag_warmset_ttl', 1.0);
   }
 
   /**
@@ -215,6 +237,28 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
     }
     $this->registerLearning();
 
+    // A speculatively fetched count answers for its tag only while it is still
+    // young. Promoting one straight into the static cache, as this class used
+    // to, made a count nobody had asked for authoritative until the process
+    // ended: fine in a web request that lasts milliseconds, wrong in a cron
+    // run, a queue worker or a migration, where an editor's save elsewhere
+    // would go unseen for the rest of the run.
+    $fresh = [];
+    if ($this->speculative) {
+      $cutoff = microtime(TRUE) - $this->speculativeTtl;
+      foreach ($requested as $tag) {
+        if (isset($this->speculative[$tag])) {
+          if ($this->speculative[$tag]['at'] >= $cutoff) {
+            $fresh[$tag] = $this->speculative[$tag]['count'];
+          }
+          // Used or expired, it has served its purpose: from here on the tag is
+          // one the caller asked for, and core's own static cache owns it.
+          unset($this->speculative[$tag]);
+        }
+      }
+    }
+
+    $outstanding = array_values(array_diff($requested, array_keys($fresh)));
     $known = array_keys($this->tagCache);
     // Delayed tags are excluded from every speculative fetch, for the reason
     // given in ::registerCacheTagsForPreload(). The filter is repeated here
@@ -239,11 +283,18 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
       }
     }
 
-    if (!$extra) {
-      return parent::getTagInvalidationCounts($requested);
+    // Everything the caller asked for was still fresh from an earlier
+    // speculative read, so there is nothing to go to Redis for. Speculating
+    // further would mean a round trip this request had otherwise avoided.
+    if (!$outstanding) {
+      return $fresh;
     }
 
-    $all = array_merge($requested, array_values($extra));
+    if (!$extra) {
+      return $fresh + parent::getTagInvalidationCounts($outstanding);
+    }
+
+    $all = array_merge($outstanding, array_values($extra));
     $values = $this->client->mget(array_map([$this, 'getTagKey'], $all));
     if (!$values) {
       return [];
@@ -251,12 +302,16 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
 
     $counts = array_map('intval', array_combine($all, $values));
 
-    // Anything that was only fetched speculatively goes straight into the
-    // static cache; the caller only gets what it asked for.
-    $requested_keys = array_flip($requested);
-    $this->tagCache += array_diff_key($counts, $requested_keys);
+    // What was only fetched speculatively is held here, with the moment it was
+    // read, rather than in the static cache: it becomes authoritative when a
+    // caller actually asks for it, and only if it is still young enough.
+    $now = microtime(TRUE);
+    $requested_keys = array_flip($outstanding);
+    foreach (array_diff_key($counts, $requested_keys) as $tag => $count) {
+      $this->speculative[$tag] = ['count' => $count, 'at' => $now];
+    }
 
-    return array_intersect_key($counts, $requested_keys);
+    return $fresh + array_intersect_key($counts, $requested_keys);
   }
 
   /**
