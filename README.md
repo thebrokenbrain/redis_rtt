@@ -157,10 +157,13 @@ Six independent changes, all aimed at the same thing:
   so they leave the critical path entirely. Repeated writes to a key are
   deduplicated, and reads are answered from the buffer.
 - **No redirect hop on render cache hits.** `VariationCache` reads a cache ID,
-  gets a `CacheRedirect` naming the real cache contexts, then reads again. That
-  mapping is structural, so it is memoised in APCu and the second read goes
-  straight to the answer. It is verified on use: a stale mapping degrades to a
-  miss, never to wrong data.
+  gets a `CacheRedirect` naming the real cache contexts, then reads again, and
+  each hop waits for the one before it. That chain is structural, so its shape
+  is memoised in APCu and the whole chain is then fetched in a single `MGET`
+  instead of one sequential read per hop. The memoised shape is verified against
+  what came back before its answer is used - every hop has to still be the
+  redirect that was learned - so a stale mapping degrades to a miss, never to
+  wrong data.
 - **Batched cache tag checksums.** The redis backend issues a plain `GET` per
   single-tag checksum, and a page request makes about thirty of them. The set of
   tags a request touches is nearly constant, so it is learned and fetched in one
@@ -230,10 +233,17 @@ happens in between still wins.
 
 **Q: Can the render cache shortcut serve the wrong variation?**
 
-**A:** No. The shortcut is only accepted when the entry it lands on exists and
-is not itself a `CacheRedirect`; anything else falls back to the full chain
-walk. Because the fallback reuses the reply the shortcut already fetched, a
-wrong guess costs no extra round trip - it just does not save one.
+**A:** No, but only because it verifies the whole chain rather than its
+destination. Landing on data is not evidence that the data is the right data:
+core rewrites a chain's redirects in place when an element's cache contexts
+change, and it never deletes the entry that hung off the old path, so an address
+the chain no longer leads to can stay populated with an entry cached for a
+different set of contexts. So the memoised mapping records the contexts of every
+redirect in the chain, and the shortcut is accepted only when each of them is
+still exactly what was learned and the entry at the end is real data. Anything
+else falls back to the full chain walk. The verification is free in round trips
+- the whole chain arrives in one `MGET` - and so is a wrong guess, because the
+fallback reuses the replies already in hand.
 
 **Q: Does this remove the per-request `AUTH`?**
 

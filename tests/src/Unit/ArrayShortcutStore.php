@@ -24,6 +24,16 @@ final class ArrayShortcutStore implements ShortcutStoreInterface {
   public array $entries = [];
 
   /**
+   * How many mappings have been discarded.
+   *
+   * A shortcut that is not trusted deletes its mapping and the caller then
+   * re-learns it, so the store ends up looking the same either way. Counting
+   * the discard is the only way a test can tell "the shortcut was used" from
+   * "the shortcut was thrown away and the chain walked instead".
+   */
+  public int $deletes = 0;
+
+  /**
    * {@inheritdoc}
    */
   public function get(string $key): ?array {
@@ -41,6 +51,7 @@ final class ArrayShortcutStore implements ShortcutStoreInterface {
    * {@inheritdoc}
    */
   public function delete(string $key): void {
+    $this->deletes++;
     unset($this->entries[$key]);
   }
 

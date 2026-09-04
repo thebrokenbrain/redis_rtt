@@ -37,11 +37,24 @@ use Symfony\Component\HttpFoundation\RequestStack;
  * cache ID, which is then built from the current request's context values as
  * usual.
  *
- * Correctness is not taken on trust. The shortcut is only accepted when the
- * entry it lands on exists and is not itself a CacheRedirect; anything else
- * falls back to the full chain walk and re-learns the mapping. Because the
- * fallback reuses the reply already fetched by the shortcut, a wrong guess
- * costs no extra round trip - it just does not save one.
+ * Correctness is not taken on trust, and landing on data is not evidence that
+ * the data is the right data. Core's VariationCache::set() reshapes a chain in
+ * place when an element's contexts change, and it never deletes the data entry
+ * that hung off the old path, so an address the chain no longer leads to can
+ * stay populated with an entry cached for a different set of contexts. A
+ * shortcut that only checked its destination would return that entry - to a
+ * user it was never cached for.
+ *
+ * So the mapping records the whole shape of the chain, the cache contexts of
+ * every redirect in it in order, and using it verifies that shape: every
+ * intermediate entry must still be a CacheRedirect naming exactly the contexts
+ * that were learned. Anything else falls back to the full chain walk and
+ * re-learns the mapping.
+ *
+ * The entire chain is fetched in one multi-get, so verification costs a single
+ * round trip where the walk costs one per hop, and a mapping that fails
+ * verification costs nothing extra: the replies are memoized, so the fallback
+ * walk reuses them.
  */
 class RedirectShortcutVariationCache extends VariationCache {
 
@@ -90,14 +103,11 @@ class RedirectShortcutVariationCache extends VariationCache {
 
     $shortcut_key = $this->getShortcutKey($keys, $initial_cacheability);
 
-    if ($contexts = $this->store->get($shortcut_key)) {
-      $cacheability = (new CacheableMetadata())->setCacheContexts($contexts);
-      $result = $this->fetch($this->createCacheIdFast($keys, $cacheability));
-      // Only trust the shortcut when it lands on real data. A miss or a
-      // redirect means the mapping no longer describes reality.
-      if ($result && !($result->data instanceof CacheRedirect)) {
+    if ($shape = $this->store->get($shortcut_key)) {
+      if ($result = $this->followShortcut($keys, $initial_cacheability, $shape)) {
         return $result;
       }
+      // The mapping no longer describes what is in the cache.
       $this->store->delete($shortcut_key);
     }
 
@@ -107,7 +117,7 @@ class RedirectShortcutVariationCache extends VariationCache {
     // Learn the mapping, but only from a chain that actually took a hop and
     // ended on data. A single-entry chain has nothing to shortcut.
     if (count($chain) > 1 && $result && !($result->data instanceof CacheRedirect)) {
-      $this->store->set($shortcut_key, $this->finalContexts($chain));
+      $this->store->set($shortcut_key, $this->chainShape($chain));
     }
 
     return $result;
@@ -180,22 +190,121 @@ class RedirectShortcutVariationCache extends VariationCache {
   }
 
   /**
-   * Returns the cache contexts of the last redirect in a chain.
+   * Resolves a learned chain shape, verifying it against the cache.
+   *
+   * @param string[] $keys
+   *   The cache keys.
+   * @param \Drupal\Core\Cache\CacheableDependencyInterface $initial_cacheability
+   *   The pre-bubbling cacheable metadata.
+   * @param array<mixed> $shape
+   *   A chain shape as returned by ::chainShape().
+   *
+   * @return object|null
+   *   The cache item the learned chain leads to, or NULL when the mapping does
+   *   not describe what is in the cache and the chain has to be walked.
+   */
+  protected function followShortcut(array $keys, CacheableDependencyInterface $initial_cacheability, array $shape): ?object {
+    // A mapping written before the shape was recorded holds a flat context
+    // list, which proves nothing about the hops. Discard it.
+    foreach ($shape as $contexts) {
+      if (!is_array($contexts)) {
+        return NULL;
+      }
+    }
+
+    try {
+      $cids = [$this->createCacheIdFast($keys, $initial_cacheability)];
+      foreach ($shape as $contexts) {
+        $cids[] = $this->createCacheIdFast($keys, (new CacheableMetadata())->setCacheContexts($contexts));
+      }
+    }
+    catch (\Throwable $e) {
+      // A learned token can outlive the module that provided it: this store
+      // survives a cache rebuild and a module uninstall, and converting a token
+      // whose service is gone throws. Only the mapping is unusable - the chain
+      // walk below converts nothing but the tokens that are still in the cache.
+      return NULL;
+    }
+
+    $this->prefetch($cids);
+
+    // Every hop has to still be the redirect that was learned. Checking only
+    // the destination would accept an entry orphaned by a reshaped chain.
+    foreach ($shape as $i => $contexts) {
+      $result = $this->fetch($cids[$i]);
+      if (!$result || !($result->data instanceof CacheRedirect)) {
+        return NULL;
+      }
+      if (!$this->sameContexts($result->data->getCacheContexts(), $contexts)) {
+        return NULL;
+      }
+    }
+
+    $result = $this->fetch($cids[count($shape)]);
+
+    return $result && !($result->data instanceof CacheRedirect) ? $result : NULL;
+  }
+
+  /**
+   * Reads several cache IDs into the memo in one round trip.
+   *
+   * @param string[] $cids
+   *   The cache IDs to fetch.
+   */
+  protected function prefetch(array $cids): void {
+    $wanted = [];
+    foreach ($cids as $cid) {
+      if (!array_key_exists($cid, $this->fetched)) {
+        $wanted[$cid] = $cid;
+      }
+    }
+    if (!$wanted) {
+      return;
+    }
+
+    $lookup = array_values($wanted);
+    $found = $this->cacheBackend->getMultiple($lookup);
+    foreach ($wanted as $cid) {
+      $this->fetched[$cid] = $found[$cid] ?? FALSE;
+    }
+  }
+
+  /**
+   * Records the shape of a redirect chain.
    *
    * @param array<string, object|false> $chain
    *   A redirect chain as returned by ::getRedirectChain().
    *
-   * @return string[]
-   *   The cache contexts that lead to the data entry.
+   * @return array<int, string[]>
+   *   The cache contexts of every redirect in the chain, in order. The last one
+   *   is what the data entry varies by; the ones before it are the hops that
+   *   lead there, and they are what makes the mapping verifiable.
    */
-  protected function finalContexts(array $chain): array {
-    $contexts = [];
+  protected function chainShape(array $chain): array {
+    $shape = [];
     foreach ($chain as $result) {
       if ($result && $result->data instanceof CacheRedirect) {
-        $contexts = $result->data->getCacheContexts();
+        $shape[] = $result->data->getCacheContexts();
       }
     }
-    return $contexts;
+    return $shape;
+  }
+
+  /**
+   * Compares two lists of cache contexts regardless of order.
+   *
+   * @param string[] $a
+   *   One list of cache contexts.
+   * @param string[] $b
+   *   The other one.
+   *
+   * @return bool
+   *   TRUE when they hold the same tokens.
+   */
+  protected function sameContexts(array $a, array $b): bool {
+    sort($a);
+    sort($b);
+    return $a === $b;
   }
 
   /**

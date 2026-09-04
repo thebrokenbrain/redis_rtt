@@ -28,10 +28,22 @@ final class CountingMemoryBackend implements CacheBackendInterface {
   public int $gets = 0;
 
   /**
+   * Trips to the backend: one per ::get(), one per ::getMultiple().
+   *
+   * This is the number the module exists to reduce. A multi-get is a single
+   * MGET on the wire however many cache IDs it asks for, so counting gets alone
+   * would make batching look free where it is not, and would make a shortcut
+   * that verifies a whole chain in one multi-get look more expensive than the
+   * hop-by-hop walk it replaces.
+   */
+  public int $roundTrips = 0;
+
+  /**
    * Resets the counters, keeping the stored items.
    */
   public function resetCounters(): void {
     $this->gets = 0;
+    $this->roundTrips = 0;
   }
 
   /**
@@ -60,6 +72,22 @@ final class CountingMemoryBackend implements CacheBackendInterface {
    *   The item, or FALSE on a miss.
    */
   public function get($cid, $allow_invalid = FALSE) {
+    $this->roundTrips++;
+    return $this->read($cid, $allow_invalid);
+  }
+
+  /**
+   * Reads one item without counting a trip to the backend.
+   *
+   * @param string $cid
+   *   The cache ID.
+   * @param bool $allow_invalid
+   *   Whether to return an invalidated entry.
+   *
+   * @return object|false
+   *   The item, or FALSE on a miss.
+   */
+  private function read(string $cid, bool $allow_invalid) {
     $this->gets++;
     $item = $this->items[$cid] ?? FALSE;
     if ($item && !$allow_invalid && !$item->valid) {
@@ -80,9 +108,10 @@ final class CountingMemoryBackend implements CacheBackendInterface {
    *   The items, keyed by cache ID.
    */
   public function getMultiple(&$cids, $allow_invalid = FALSE) {
+    $this->roundTrips++;
     $found = [];
     foreach ($cids as $cid) {
-      if ($item = $this->get($cid, $allow_invalid)) {
+      if ($item = $this->read($cid, $allow_invalid)) {
         $found[$cid] = $item;
       }
     }
