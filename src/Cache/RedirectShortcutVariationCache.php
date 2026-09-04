@@ -75,6 +75,11 @@ class RedirectShortcutVariationCache extends VariationCache {
   protected ShortcutStoreInterface $store;
 
   /**
+   * How many chain entries the per-request memo may hold.
+   */
+  protected int $memoLimit;
+
+  /**
    * Whether the shortcut is switched on.
    */
   protected bool $enabled;
@@ -90,6 +95,7 @@ class RedirectShortcutVariationCache extends VariationCache {
 
     $this->store = $store ?? new ApcuShortcutStore($this->bin);
     $this->enabled = (bool) Settings::get('redis_rtt_redirect_shortcut', TRUE);
+    $this->memoLimit = max(1, (int) Settings::get('redis_rtt_chain_memo_limit', 1000));
   }
 
   /**
@@ -130,7 +136,12 @@ class RedirectShortcutVariationCache extends VariationCache {
     parent::set($keys, $data, $cacheability, $initial_cacheability);
 
     // The chain this write just created or reshaped is now stale in both memos.
-    $this->fetched = [];
+    // Only this element's chain, though: core reshapes the redirects under the
+    // cache ID it was given and leaves every other element alone, so dropping
+    // the whole memo would make each write re-walk chains it already knows.
+    // That matters because Renderer::doRender() writes an ancestor after all of
+    // its descendants, so a wholesale drop costs a re-walk per nesting level.
+    $this->forgetChain($keys);
     $this->store->delete($this->getShortcutKey($keys, $initial_cacheability));
   }
 
@@ -139,7 +150,7 @@ class RedirectShortcutVariationCache extends VariationCache {
    */
   public function delete(array $keys, CacheableDependencyInterface $initial_cacheability): void {
     parent::delete($keys, $initial_cacheability);
-    $this->fetched = [];
+    $this->forgetChain($keys);
   }
 
   /**
@@ -147,7 +158,7 @@ class RedirectShortcutVariationCache extends VariationCache {
    */
   public function invalidate(array $keys, CacheableDependencyInterface $initial_cacheability): void {
     parent::invalidate($keys, $initial_cacheability);
-    $this->fetched = [];
+    $this->forgetChain($keys);
   }
 
   /**
@@ -186,7 +197,47 @@ class RedirectShortcutVariationCache extends VariationCache {
     if (array_key_exists($cid, $this->fetched)) {
       return $this->fetched[$cid];
     }
-    return $this->fetched[$cid] = $this->cacheBackend->get($cid);
+    $reply = $this->cacheBackend->get($cid);
+    $this->remember($cid, $reply);
+    return $reply;
+  }
+
+  /**
+   * Memoizes a reply, but only when it is safe to answer a later read with it.
+   *
+   * A CacheRedirect is a structural fact: it says which contexts the entry
+   * varies by, which cannot change without a write, and a write clears this
+   * memo. A miss is equally safe - nothing in this request can turn it into a
+   * hit except a write.
+   *
+   * A data hit is not safe. Its validity depends on cache tags that any other
+   * process can invalidate at any moment, and that check happens in the backend
+   * on every read (\Drupal\redis\Cache\RedisBackend::expandEntry() asks the
+   * checksum provider). Keeping the entry here would answer the next read
+   * without that check, so an entry invalidated mid-process would go on being
+   * served as fresh - and in a queue worker or an indexing run, "mid-process"
+   * is minutes. Core 11.2 draws the same line in its own chain memo, for the
+   * same reason.
+   *
+   * @param string $cid
+   *   The cache ID.
+   * @param object|false $reply
+   *   What the backend returned.
+   */
+  protected function remember(string $cid, $reply): void {
+    if ($reply !== FALSE && !($reply->data instanceof CacheRedirect)) {
+      return;
+    }
+
+    // Bounded, because a process that renders continuously - a queue worker, an
+    // indexing run, a migration - would otherwise accumulate one entry per
+    // element for its whole life. Dropping the oldest costs one round trip if
+    // it is wanted again, which is the right price for a memo.
+    if (count($this->fetched) >= $this->memoLimit) {
+      array_shift($this->fetched);
+    }
+
+    $this->fetched[$cid] = $reply;
   }
 
   /**
@@ -226,12 +277,12 @@ class RedirectShortcutVariationCache extends VariationCache {
       return NULL;
     }
 
-    $this->prefetch($cids);
+    $replies = $this->readMany($cids);
 
     // Every hop has to still be the redirect that was learned. Checking only
     // the destination would accept an entry orphaned by a reshaped chain.
     foreach ($shape as $i => $contexts) {
-      $result = $this->fetch($cids[$i]);
+      $result = $replies[$cids[$i]];
       if (!$result || !($result->data instanceof CacheRedirect)) {
         return NULL;
       }
@@ -240,33 +291,46 @@ class RedirectShortcutVariationCache extends VariationCache {
       }
     }
 
-    $result = $this->fetch($cids[count($shape)]);
+    $result = $replies[$cids[count($shape)]];
 
     return $result && !($result->data instanceof CacheRedirect) ? $result : NULL;
   }
 
   /**
-   * Reads several cache IDs into the memo in one round trip.
+   * Reads several cache IDs in one round trip.
    *
    * @param string[] $cids
    *   The cache IDs to fetch.
+   *
+   * @return array<string, object|false>
+   *   The replies, keyed by cache ID.
    */
-  protected function prefetch(array $cids): void {
+  protected function readMany(array $cids): array {
+    $replies = [];
     $wanted = [];
     foreach ($cids as $cid) {
-      if (!array_key_exists($cid, $this->fetched)) {
+      if (array_key_exists($cid, $this->fetched)) {
+        $replies[$cid] = $this->fetched[$cid];
+      }
+      else {
         $wanted[$cid] = $cid;
       }
     }
-    if (!$wanted) {
-      return;
+
+    if ($wanted) {
+      $lookup = array_values($wanted);
+      $found = $this->cacheBackend->getMultiple($lookup);
+      foreach ($wanted as $cid) {
+        $reply = $found[$cid] ?? FALSE;
+        $replies[$cid] = $reply;
+        $this->remember($cid, $reply);
+      }
     }
 
-    $lookup = array_values($wanted);
-    $found = $this->cacheBackend->getMultiple($lookup);
-    foreach ($wanted as $cid) {
-      $this->fetched[$cid] = $found[$cid] ?? FALSE;
-    }
+    // Returned rather than left in the memo: the entry at the end of the chain
+    // is a data hit, which ::remember() deliberately does not keep, and the
+    // caller still has to be able to use the reply it just paid for.
+    return $replies;
   }
 
   /**
@@ -288,6 +352,25 @@ class RedirectShortcutVariationCache extends VariationCache {
       }
     }
     return $shape;
+  }
+
+  /**
+   * Forgets the memoised chain of one element, leaving every other one alone.
+   *
+   * @param string[] $keys
+   *   The cache keys of the element whose chain has just changed.
+   */
+  protected function forgetChain(array $keys): void {
+    // Every cache ID in one element's chain is built from the same cache keys,
+    // with the resolved context values appended (::createCacheIdFast()), so the
+    // element's own keys are the prefix that identifies its chain and nothing
+    // else.
+    $base = implode(':', $keys);
+    foreach (array_keys($this->fetched) as $cid) {
+      if ($cid === $base || str_starts_with($cid, $base . ':')) {
+        unset($this->fetched[$cid]);
+      }
+    }
   }
 
   /**

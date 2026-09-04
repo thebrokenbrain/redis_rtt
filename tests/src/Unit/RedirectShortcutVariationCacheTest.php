@@ -140,7 +140,7 @@ class RedirectShortcutVariationCacheTest extends UnitTestCase {
    *
    * @covers ::get
    * @covers ::followShortcut
-   * @covers ::prefetch
+   * @covers ::readMany
    */
   public function testHitCostsOneRoundTripOnceLearned(): void {
     $this->seed(['element']);
@@ -387,11 +387,17 @@ class RedirectShortcutVariationCacheTest extends UnitTestCase {
   }
 
   /**
-   * Repeated reads of one cache ID in a request hit the backend once.
+   * The chain is memoised within a request; the data deliberately is not.
+   *
+   * Memoising the redirect is what removes the duplicate chain walk. Memoising
+   * the data would remove something else: the backend's cache tag check, which
+   * happens on every read. So the second read of the same element costs the one
+   * round trip for the data and none for the hop.
    *
    * @covers ::fetch
+   * @covers ::remember
    */
-  public function testReadsAreMemoisedWithinRequest(): void {
+  public function testTheChainIsMemoisedButTheDataIsNot(): void {
     $this->seed(['element']);
     $cache = $this->cache(FALSE);
 
@@ -399,7 +405,34 @@ class RedirectShortcutVariationCacheTest extends UnitTestCase {
     $this->backend->resetCounters();
     $cache->get(['element'], $this->initial);
 
-    $this->assertSame(0, $this->backend->gets);
+    $this->assertSame(1, $this->backend->roundTrips, 'The redirect hop is memoised, the data is re-read.');
+  }
+
+  /**
+   * An entry invalidated mid-process must not be served from the memo.
+   *
+   * Cache tags are invalidated by other processes, and the backend enforces
+   * them on read. A memo that answers a later read with an earlier hit skips
+   * that enforcement, so the entry goes on being served as fresh - for the life
+   * of the process, which in a queue worker or an indexing run is minutes. Core
+   * 11.2 excludes hits from its own chain memo for this exact reason.
+   *
+   * @covers ::remember
+   */
+  public function testAnInvalidatedEntryIsNotServedFromTheMemo(): void {
+    $this->seed(['element']);
+    $cache = $this->cache(FALSE);
+
+    $this->assertNotFalse($cache->get(['element'], $this->initial), 'Warm the memo.');
+
+    // Another process invalidates it: no write happens through this service, so
+    // nothing here knows about it.
+    $this->backend->invalidateAll();
+
+    $this->assertFalse(
+      $cache->get(['element'], $this->initial),
+      'The entry is invalid now, and a memo must not be able to hide that.',
+    );
   }
 
   /**
