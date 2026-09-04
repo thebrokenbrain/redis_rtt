@@ -16,8 +16,13 @@ services:
   # ---------------------------------------------------------------------------
   # 1. Cache tag checksums resolved in one MGET instead of one per tag group.
   #
-  # Replaces the redis module's RedisCacheTagsChecksum. Pure win, no behaviour
-  # change: it only batches lookups that were already going to happen.
+  # Replaces the redis module's RedisCacheTagsChecksum. It batches lookups that
+  # were going to happen anyway, and it also speculates: tags this request has
+  # not asked for yet, but that requests like it usually check, ride along in
+  # the same MGET. A tag whose invalidation is waiting on an open database
+  # transaction is deliberately excluded from that speculation - fetching its
+  # pre-invalidation count would pin it in the static cache for the rest of the
+  # process, and that is how stale content gets served as fresh.
   # ---------------------------------------------------------------------------
   cache_tags.invalidator.checksum:
     class: Drupal\redis_rtt\Cache\PreloadingRedisCacheTagsChecksum

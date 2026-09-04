@@ -15,11 +15,30 @@ use Drupal\redis\ClientFactory;
  *
  * First, the redis 2.x backend calls ::registerCacheTagsForPreload() on the
  * checksum provider after a multi-get, but only when the provider implements
- * that method. Core only ships CacheTagsChecksumPreloadInterface from 11.1
- * onwards, so on Drupal 10.x the redis module's provider implements nothing but
- * an empty back-compat marker and the preload hook is dead code. Implementing
- * it lets the first MGET that has to happen anyway also fetch every other tag
- * seen in the same read.
+ * that method. Core only ships CacheTagsChecksumPreloadInterface, and the trait
+ * code behind it, from 11.2 onwards; on 10.x and on 11.0/11.1 the redis
+ * module's provider implements nothing but an empty back-compat marker and the
+ * preload hook is dead code. Implementing it lets the first MGET that has to
+ * happen anyway also fetch every other tag seen in the same read.
+ *
+ * From 11.2 core consumes the registered tags itself, in
+ * CacheTagsChecksumTrait::calculateChecksum(), which merges them into the tag
+ * list and empties $preloadTags before ::getTagInvalidationCounts() is ever
+ * called. Nothing below branches on the core version for that. The property is
+ * simply kept in the shape core expects - a plain list of tag names - so that
+ * whichever of the two consumes it, the same tags end up in the same MGET, and
+ * the half of this class that the version makes no difference to, the learned
+ * set, is unaffected either way.
+ *
+ * One consequence of that hand-over is worth stating plainly, because it is a
+ * gap and not a guarantee: on 11.2 core merges the registered tags into the
+ * requested list *without* re-checking $delayedTags, so a tag registered by a
+ * cache read and only then invalidated inside an open transaction reaches this
+ * class as a requested tag, which it does not filter. The pre-invalidation
+ * count is then pinned in the static cache for the rest of the process. Stock
+ * \Drupal\redis\Cache\RedisCacheTagsChecksum has the same gap on 11.2, so it
+ * is upstream rather than something this class introduces, and closing it here
+ * would mean re-taking ownership of the mechanism core has just taken over.
  *
  * Second - and this only shows up when you actually watch the wire - the
  * provider issues a plain GET whenever a checksum is wanted for a single tag:
@@ -52,9 +71,17 @@ use Drupal\redis\ClientFactory;
 class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
 
   /**
-   * Tags seen in a cache read but not yet resolved, as a set.
+   * Tags seen in a cache read but not yet resolved, in registration order.
    *
-   * @var array<string, true>
+   * A list of tag names and not a set, because from Drupal 11.2 this property
+   * belongs to core's CacheTagsChecksumTrait, which folds it into the tag list
+   * with array_merge() and array_unique(). A set does not survive that merge as
+   * a set: its boolean values land in the tag list beside the real tags, where
+   * TRUE reads as the tag "1". That is a bogus <prefix>:cachetags:1 key in
+   * every MGET from then on, and a permanent junk entry in the learned set
+   * below.
+   *
+   * @var string[]
    */
   protected array $preloadTags = [];
 
@@ -139,14 +166,36 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
   /**
    * Registers tags that are likely to be checked shortly.
    *
-   * @param string[] $tags
+   * @param string[] $cache_tags
    *   The cache tags found in a batch of cache entries.
    */
-  public function registerCacheTagsForPreload(array $tags): void {
-    foreach ($tags as $tag) {
-      if (!isset($this->tagCache[$tag])) {
-        $this->preloadTags[$tag] = TRUE;
-      }
+  public function registerCacheTagsForPreload(array $cache_tags): void {
+    if (!$cache_tags) {
+      return;
+    }
+    // Don't preload delayed tags that are awaiting invalidation. Their counter
+    // in Redis is still the pre-invalidation one - the INCR is held back until
+    // the enclosing database transaction commits - so fetching one here would
+    // pin the old count in the static tag cache, and nothing clears that cache
+    // when the transaction ends. Every later check of that tag in this process
+    // would then say the stale entry is still fresh, which for a drush, cron or
+    // queue process means the rest of its life.
+    //
+    // Tags already in the static cache, and tags already queued, are dropped
+    // here rather than left for the consumer to deduplicate. Core 11.2 drains
+    // this list on every checksum calculation, so a duplicate would cost it
+    // little; core 10.3 to 11.1 only drains it when a checksum actually has to
+    // be calculated, which never happens while the static cache answers every
+    // lookup - and then a list that only ever grows turns a long-running
+    // process into a memory leak with a quadratic array_merge() attached.
+    $preloadable_tags = array_diff(
+      $cache_tags,
+      $this->delayedTags,
+      array_keys($this->tagCache),
+      $this->preloadTags,
+    );
+    if ($preloadable_tags) {
+      $this->preloadTags = array_merge($this->preloadTags, $preloadable_tags);
     }
   }
 
@@ -167,7 +216,17 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
     $this->registerLearning();
 
     $known = array_keys($this->tagCache);
-    $extra = array_diff(array_keys($this->preloadTags), $requested, $known);
+    // Delayed tags are excluded from every speculative fetch, for the reason
+    // given in ::registerCacheTagsForPreload(). The filter is repeated here
+    // rather than trusted from registration time, because a tag can be
+    // registered by a cache read and only then invalidated inside the
+    // transaction, and because the learned set below never went through
+    // registration at all. On 11.2 the first of those two cases is core's to
+    // catch and it does not, as the class docblock records; here the repeat
+    // still covers the learned set on every version. Tags that were genuinely
+    // asked for are left alone: dropping one would make the caller record a
+    // zero for it instead.
+    $extra = array_unique(array_diff($this->preloadTags, $requested, $known, $this->delayedTags));
     $this->preloadTags = [];
 
     // The first lookup of the request carries the whole learned set along.
@@ -176,7 +235,7 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
     if (!$this->warmSetUsed) {
       $this->warmSetUsed = TRUE;
       if ($warm = $this->warmSet()) {
-        $extra = array_merge($extra, array_diff($warm, $requested, $extra, $known));
+        $extra = array_merge($extra, array_diff($warm, $requested, $extra, $known, $this->delayedTags));
       }
     }
 
