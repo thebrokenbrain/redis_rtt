@@ -120,12 +120,44 @@ the module can be rolled out in stages.
 ### Bootstrap container
 
 If the site reads its compiled service container from Redis - which it should,
-in this kind of topology - point the bootstrap container's client factory at
-this module so the connection is established with timeouts configured:
+in this kind of topology - the bootstrap container's client factory should be
+this module's, so that connection is established with timeouts configured too.
+
+`bootstrap_container_definition` **replaces** core's default definition rather
+than merging into it, so it has to be given in full. Assigning only the one key
+leaves a bootstrap container with nothing but `redis.factory` in it, and every
+request returns a 500 that neither the UI nor drush can undo - only editing
+`settings.php` recovers the site.
+
+This is the redis module's own block with one class swapped, and it belongs
+*after* the `$settings['redis.connection']` lines above:
 
 ```php
-$settings['bootstrap_container_definition']['services']['redis.factory']['class']
-  = 'Drupal\redis_rtt\ClientFactory';
+$settings['bootstrap_container_definition'] = [
+  'parameters' => [],
+  'services' => [
+    'redis.factory' => [
+      // The only line that differs from the redis module's own example.
+      'class' => 'Drupal\redis_rtt\ClientFactory',
+    ],
+    'cache.backend.redis' => [
+      'class' => 'Drupal\redis\Cache\CacheBackendFactory',
+      'arguments' => ['@redis.factory', '@cache_tags_provider.container', '@serialization.phpserialize'],
+    ],
+    'cache.container' => [
+      'class' => '\Drupal\redis\Cache\PhpRedis',
+      'factory' => ['@cache.backend.redis', 'get'],
+      'arguments' => ['container'],
+    ],
+    'cache_tags_provider.container' => [
+      'class' => 'Drupal\redis\Cache\RedisCacheTagsChecksum',
+      'arguments' => ['@redis.factory'],
+    ],
+    'serialization.phpserialize' => [
+      'class' => 'Drupal\Component\Serialization\PhpSerialize',
+    ],
+  ],
+];
 ```
 
 ### Available settings
