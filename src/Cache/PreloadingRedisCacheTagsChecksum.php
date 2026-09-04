@@ -342,10 +342,40 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
 
   /**
    * {@inheritdoc}
+   *
+   * A tag this process invalidates makes every speculative count for it wrong
+   * at once, and the freshness window is no protection: the count was read
+   * before the increment, so it can still be young and still be stale. Worse
+   * than serving one stale entry, promoting it would stamp every cache entry
+   * written afterwards with the pre-invalidation checksum, and since the
+   * counters only ever rise, those entries become a permanent miss for every
+   * other process on the site.
+   *
+   * Core's trait drops the tag from its own static cache here; this drops it
+   * from the speculative map for the same reason.
+   *
+   * @param string[] $tags
+   *   The tags being invalidated.
+   *
+   * @return void
+   *   Typed in the docblock rather than the signature: the trait this overrides
+   *   declares no return type, and adding one here would fix a contract the
+   *   redis module may not want fixed.
+   */
+  public function invalidateTags(array $tags) {
+    foreach ($tags as $tag) {
+      unset($this->speculative[$tag]);
+    }
+    parent::invalidateTags($tags);
+  }
+
+  /**
+   * {@inheritdoc}
    */
   public function reset(): void {
     parent::reset();
     $this->preloadTags = [];
+    $this->speculative = [];
     $this->warmSetUsed = FALSE;
   }
 

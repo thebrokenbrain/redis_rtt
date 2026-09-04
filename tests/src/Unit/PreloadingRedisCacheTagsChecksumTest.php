@@ -71,6 +71,19 @@ class PreloadingRedisCacheTagsChecksumTest extends UnitTestCase {
    * a tag is invalidated, so a container holding a mock is all it takes to put
    * an invalidation on the delayed path.
    */
+  protected function noTransaction(): void {
+    $connection = $this->createMock(Connection::class);
+    $connection->method('inTransaction')->willReturn(FALSE);
+    $connection->method('transactionManager')
+      ->willReturn($this->createMock(TransactionManagerInterface::class));
+    $container = new ContainerBuilder();
+    $container->set('database', $connection);
+    \Drupal::setContainer($container);
+  }
+
+  /**
+   * Puts a mocked open transaction in the container.
+   */
   protected function openTransaction(): void {
     $connection = $this->createMock(Connection::class);
     $connection->method('inTransaction')->willReturn(TRUE);
@@ -347,6 +360,45 @@ class PreloadingRedisCacheTagsChecksumTest extends UnitTestCase {
       4,
       (int) $provider->getCurrentChecksum(['node:1']),
       'An aged speculative count must be re-read, not served.',
+    );
+  }
+
+  /**
+   * Invalidating a tag must drop the speculative count this process holds.
+   *
+   * The freshness window is no protection here: the count was read before the
+   * increment, so it can be young and stale at the same time. And promoting it
+   * would do more than serve one stale entry - every cache entry written
+   * afterwards would carry the pre-invalidation checksum, and since the
+   * counters only rise, those entries would be a permanent miss for every other
+   * process on the site.
+   *
+   * @covers ::invalidateTags
+   */
+  public function testInvalidatingATagDropsItsSpeculativeCount(): void {
+    new Settings([
+      'redis_rtt_tag_warmset_min_hits' => 2,
+      // Long enough that only the invalidation can drop the count.
+      'redis_rtt_tag_warmset_ttl' => 60.0,
+      'cache_prefix' => 'drupal',
+    ]);
+    $this->noTransaction();
+    $this->client->data['drupal:cachetags:node:1'] = 3;
+    $this->client->data['drupal:cachetags:node:2'] = 1;
+
+    $provider = $this->provider();
+    // node:1 is fetched speculatively while looking up node:2.
+    $provider->registerCacheTagsForPreload(['node:1']);
+    $provider->getCurrentChecksum(['node:2']);
+
+    // This same process now invalidates node:1.
+    $provider->invalidateTags(['node:1']);
+    $expected = (int) $this->client->data['drupal:cachetags:node:1'];
+
+    $this->assertSame(
+      $expected,
+      (int) $provider->getCurrentChecksum(['node:1']),
+      'A speculative count cannot survive the invalidation of its own tag.',
     );
   }
 
