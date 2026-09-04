@@ -39,6 +39,11 @@ class ApcuShortcutStore implements ShortcutStoreInterface {
    */
   protected int $ttl;
 
+  /**
+   * Whether APCu has refused a write, so this request stops attempting them.
+   */
+  protected bool $full = FALSE;
+
   public function __construct(string $bin) {
     $this->apcu = function_exists('apcu_fetch')
       && filter_var(ini_get('apc.enabled'), FILTER_VALIDATE_BOOL)
@@ -74,8 +79,19 @@ class ApcuShortcutStore implements ShortcutStoreInterface {
       return;
     }
     $this->memo[$key] = $value;
-    if ($this->apcu) {
-      apcu_store($this->prefix . $key, $value, $this->ttl);
+    if (!$this->apcu || $this->full) {
+      return;
+    }
+
+    // A failed store means the segment is out of room. Core shares it: the
+    // class loader map and the APCu cache backend live there too, and APCu
+    // answers a full segment with a complete expunge, not an eviction of the
+    // least useful key. Filling it would therefore cost every worker its class
+    // map, repeatedly. This store is a memo whose entries are worth one round
+    // trip each, so it yields the space instead: it stops writing for the rest
+    // of the request and lets what is already there expire on its own.
+    if (apcu_store($this->prefix . $key, $value, $this->ttl) === FALSE) {
+      $this->full = TRUE;
     }
   }
 

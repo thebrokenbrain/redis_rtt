@@ -46,6 +46,15 @@ it the render cache redirect shortcut and the cache tag warm set still behave
 correctly, but nothing they learn survives the request, so they save nothing.
 The status report says so if APCu is missing.
 
+Size `apc.shm_size` for the site. What this module learns is one small entry per
+cacheable element per view mode, and it shares the segment with Drupal's own
+class loader map. APCu answers a full segment with a complete expunge rather
+than by evicting the least useful key, so a segment too small for the site costs
+every worker its class map, over and over. The default 32M holds on the order of
+78,000 of these entries; a large site wants more. The module stops writing to
+APCu for the rest of the request as soon as a store is refused, so it yields the
+space rather than competing for it.
+
 
 ## Recommended modules
 
