@@ -43,6 +43,20 @@ use Drupal\redis\ClientInterface;
  *   - user: (string) ACL username, for Redis 6 style authentication.
  *   - verify_peer: (bool) verify the TLS peer, default TRUE when tls is on.
  *   - count_commands: (bool) wrap the client in a round-trip counter.
+ *
+ * Those keys configure the connection to the Redis server. In a Sentinel
+ * deployment - 'host' given as a list - they configure the connection to the
+ * master, which is the connection every command then travels over, but not the
+ * discovery exchange that finds it: that is the parent's, and it reaches each
+ * sentinel in turn with a fixed 0.5 second connect timeout, in the clear, and
+ * authenticates with the password alone, ignoring 'user'. Its read timeout is
+ * the same unbounded default this class exists to replace, so a sentinel that
+ * accepts the connection and then goes quiet blocks the worker exactly as a
+ * stock Redis connection would. Two further Sentinel caveats worth knowing:
+ * what a sentinel returns is an IP address, so 'tls' is then verified against
+ * an IP and needs either a certificate carrying that IP or verify_peer FALSE;
+ * and 'persistent' pools per host, so a failover opens a new pool rather than
+ * reusing the old master's.
  */
 class FastPhpRedisFactory extends PhpRedisFactory {
 
@@ -62,11 +76,43 @@ class FastPhpRedisFactory extends PhpRedisFactory {
    *   The connection settings.
    */
   public function getClient(#[\SensitiveParameter] array $settings): ClientInterface {
-    // Sentinel discovery is a different problem; defer to the parent for it.
+    // A list of hosts means Sentinel, so which server to connect to has to be
+    // asked for first. Only the asking is deferred to the parent; the answer is
+    // an ordinary host and port, and connecting to it is this class' whole job.
+    // Handing the connection itself back to the parent - which is what this did
+    // - dropped every setting below on exactly the deployments that fail over
+    // most often, read_timeout included.
     if (is_array($settings['host'] ?? NULL)) {
-      return $this->instrument(parent::getClient($settings), $settings);
+      $master = $this->resolveMaster($settings);
+      if ($master === NULL) {
+        // The parent carries on here with 'host' still an array and dies of a
+        // TypeError inside phpredis. Say what actually went wrong instead, and
+        // do not spend a second full round of sentinel timeouts getting there.
+        throw new \RuntimeException(sprintf(
+          'No Redis master could be resolved from the configured sentinels for instance "%s".',
+          (string) ($settings['instance'] ?? '')
+        ));
+      }
+      [$settings['host'], $settings['port']] = $master;
     }
 
+    return $this->instrument($this->connect($settings), $settings);
+  }
+
+  /**
+   * Opens a configured connection to a single server.
+   *
+   * Every client this factory hands out is built here, whether the server was
+   * named in settings.php or by a sentinel, so there is one place - and one
+   * only - where the timeouts, TLS and authentication are decided.
+   *
+   * @param array<string, mixed> $settings
+   *   The connection settings, with 'host' and 'port' naming one server.
+   *
+   * @return \Drupal\redis\ClientInterface
+   *   The connected client.
+   */
+  protected function connect(#[\SensitiveParameter] array $settings): ClientInterface {
     $redis = new \Redis();
 
     $host = $settings['host'];
@@ -139,7 +185,28 @@ class FastPhpRedisFactory extends PhpRedisFactory {
       $redis->setOption(\Redis::OPT_TCP_KEEPALIVE, 1);
     }
 
-    return $this->instrument(new FastPhpRedis($redis), $settings);
+    return new FastPhpRedis($redis);
+  }
+
+  /**
+   * Asks the sentinels which server is currently the master.
+   *
+   * @param array<string, mixed> $settings
+   *   The connection settings, with 'host' holding the list of sentinels and
+   *   'instance' naming the monitored master.
+   *
+   * @return array{0: string, 1: int}|null
+   *   The master's host and port, or NULL when no sentinel would name one.
+   */
+  protected function resolveMaster(#[\SensitiveParameter] array $settings): ?array {
+    // The parent's discovery, on a throwaway client: it leaves the one it is
+    // handed connected to whichever sentinel answered, and a sentinel is not
+    // something the rest of the request should be talking to.
+    $address = $this->askForMaster(new \Redis(), $settings);
+
+    return is_array($address) && count($address) === 2
+      ? [(string) $address[0], (int) $address[1]]
+      : NULL;
   }
 
   /**

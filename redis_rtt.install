@@ -8,6 +8,7 @@
 declare(strict_types=1);
 
 use Drupal\Core\Site\Settings;
+use Drupal\redis\ClientFactory as RedisClientFactory;
 
 /**
  * Implements hook_requirements().
@@ -92,18 +93,44 @@ function redis_rtt_requirements(string $phase): array {
   ];
 
   // --- The connection -----------------------------------------------------
-  $interface = Settings::get('redis.connection')['interface'] ?? NULL;
-  $persistent = !empty(Settings::get('redis.connection')['persistent']);
+  // Reported from the connection that exists, not from the setting that asks
+  // for one: the two are different questions. With no 'interface' named,
+  // \Drupal\redis\ClientFactory takes the highest-priority tagged factory,
+  // which is this module's whenever the module is installed, so reading the
+  // setting alone called a correctly configured site misconfigured. The client
+  // knows which one it is - that is what \Drupal\redis_rtt\Client\FastPhpRedis
+  // exists for - so ask it.
+  $connection = Settings::get('redis.connection', []);
+  $persistent = !empty($connection['persistent']);
+  $interface = $connection['interface'] ?? NULL;
+  $factory = \Drupal::hasService('redis.factory') ? \Drupal::service('redis.factory') : NULL;
+  // ::hasClient() and never ::getClient(): asking for a connection here would
+  // open one this request had no other need for, and a check that makes itself
+  // true is not a check. No client means nothing has needed Redis yet, and a
+  // named 'interface' then still settles it - ClientFactory throws on a name it
+  // does not know, and a site serving this page at all got past that - while an
+  // unnamed one leaves the choice to service priority, which cannot be read
+  // back from here.
+  $client = $factory instanceof RedisClientFactory && $factory->hasClient()
+    ? $factory->getClientName()
+    : $interface;
   $connection_notes = [];
   if (!$persistent) {
     $connection_notes[] = t('Persistent connections are off. Every request pays a fresh TCP (and TLS) handshake, which is several round trips before any work happens.');
   }
-  if ($interface !== 'FastPhpRedis') {
-    $connection_notes[] = t('The connection is not using FastPhpRedis, so no read timeout is configured. The PHP default is unlimited, which means a connection dropped by a failover blocks the worker until the FPM request timeout.');
+  if ($client === NULL) {
+    $connection_notes[] = t('No Redis connection has been made yet this request and no <code>interface</code> is named, so which client is in force cannot be reported from here - it is whichever tagged factory has the highest priority, and that depends on what else is installed. Name it to settle the question: <code>$settings["redis.connection"]["interface"] = "FastPhpRedis";</code>');
+  }
+  elseif (!str_starts_with($client, 'FastPhpRedis')) {
+    $connection_notes[] = t('The connection is @client rather than FastPhpRedis, so no read timeout is configured. The PHP default is unlimited, which means a connection dropped by a failover blocks the worker until the FPM request timeout.', ['@client' => $client]);
   }
   $requirements['redis_rtt_connection'] = [
     'title' => t('Redis RTT: Redis connection'),
-    'value' => $connection_notes ? t('Suboptimal') : t('Configured'),
+    'value' => match (TRUE) {
+      $client === NULL => t('Unknown'),
+      (bool) $connection_notes => t('Suboptimal (@client)', ['@client' => $client]),
+      default => t('Configured (@client)', ['@client' => $client]),
+    },
     'severity' => $connection_notes ? REQUIREMENT_WARNING : REQUIREMENT_OK,
     'description' => $connection_notes ? [
       '#theme' => 'item_list',
