@@ -33,6 +33,11 @@ class NullCommandBuffer implements CommandBufferInterface {
   /**
    * {@inheritdoc}
    */
+  public function registerBin(string $prefix, string $marker_key): void {}
+
+  /**
+   * {@inheritdoc}
+   */
   public function queueMarker(string $key, float $value, string $prefix): void {
     throw new \LogicException('NullCommandBuffer must never receive markers; check isEnabled() first.');
   }

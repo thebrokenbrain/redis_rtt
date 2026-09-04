@@ -41,13 +41,22 @@ interface CommandBufferInterface {
   public function queueWrite(string $key, array $hash, ?int $ttl): void;
 
   /**
-   * Queues a chained-fast "last write timestamp" marker.
+   * Records which marker key describes a bin that is buffering writes.
    *
-   * Implementations must send markers after every queued write and stamp them
-   * with the moment they are sent. A marker that reaches Redis ahead of the
-   * data it describes tells the other web nodes to re-prime their fast backends
-   * from a Redis that does not hold the new value yet, and the copy they take
-   * then outlives the marker.
+   * A bin can go a whole process without core handing a marker over: on
+   * Drupal 11.2 ChainedFastBackend::markAsOutdated() skips the write while the
+   * published stamp is still in the future. The write is still buffered, so it
+   * still has to be announced, and that needs the key.
+   *
+   * @param string $prefix
+   *   The key prefix of the bin.
+   * @param string $marker_key
+   *   The fully prefixed Redis key of that bin's chained-fast marker.
+   */
+  public function registerBin(string $prefix, string $marker_key): void;
+
+  /**
+   * Queues a chained-fast "last write timestamp" marker.
    *
    * @param string $key
    *   The fully prefixed Redis key of the marker.
@@ -55,8 +64,6 @@ interface CommandBufferInterface {
    *   The timestamp the caller wants published, treated as a lower bound.
    * @param string $prefix
    *   The key prefix of the bin this marker describes.
-   *
-   * @see \Drupal\redis_rtt\Redis\CommandBuffer::queueMarker()
    */
   public function queueMarker(string $key, float $value, string $prefix): void;
 

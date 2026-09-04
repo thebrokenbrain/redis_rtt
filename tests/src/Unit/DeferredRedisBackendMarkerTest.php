@@ -186,9 +186,9 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
    * @covers ::set
    */
   public function testDeletingOneBinLeavesAnotherBinsWaitingMarkerAlone(): void {
-    // config has data in the buffer, so its marker is waiting for it.
+    // Config has data in the buffer, so its marker is waiting for it.
     $this->configBin()->set('system.site', 'new value');
-    // discovery is cleared, so its marker has nothing to wait for.
+    // Discovery is cleared, so its marker has nothing to wait for.
     $this->discoveryBin()->deleteAll();
 
     $this->assertArrayHasKey(
@@ -217,8 +217,11 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
     $this->client->resetCounters();
     $this->buffer->flush();
 
-    $this->assertSame(['hmset', 'set'], $this->client->log, 'The entry must be written before the marker, in one pipeline.');
-    $this->assertSame(1, $this->client->roundTrips);
+    $this->assertSame(['hmset', 'set'], $this->client->log, 'The entry must be written before the marker.');
+    // The marker follows the data pipeline rather than riding in it, so that
+    // its timestamp is taken once Redis has applied the writes. See
+    // CommandBufferTest::testMarkersAreSentAfterTheWritesTheyDescribe().
+    $this->assertSame(2, $this->client->roundTrips);
 
     $marker = (float) $this->client->data[self::MARKER];
     $this->assertGreaterThanOrEqual((float) $this->client->data[self::ENTRY]['created'], $marker, 'The marker must not predate the entry it announces.');
@@ -243,6 +246,44 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
 
     $this->assertArrayHasKey(self::ENTRY, $this->client->data);
     $this->assertArrayHasKey(self::MARKER, $this->client->data);
+  }
+
+  /**
+   * A buffered write announces its bin even when core hands over no marker.
+   *
+   * Core 11.2's ChainedFastBackend::markAsOutdated() stamps 50 ms ahead and
+   * then skips the write while that stamp is still in the future, so ::set() is
+   * never called with the marker and the buffer is handed nothing to re-arm.
+   * The write is still deferred, so without this the entry lands in Redis with
+   * the marker untouched, and every node that primed a copy in between keeps
+   * serving it - permanently, since nothing moves the marker afterwards.
+   *
+   * @covers ::setMultiple
+   */
+  public function testAWriteAnnouncesItsBinWhenCoreSkipsTheMarker(): void {
+    // Redis already holds a marker for this bin, which is what makes it a
+    // chained-fast bin as far as the buffer can tell.
+    $this->client->data[self::MARKER] = '1000';
+
+    // Only the entry is queued: no marker reaches the backend, exactly as on
+    // 11.2 inside the 50 ms window.
+    $consistent = new DeferredRedisBackend(
+      'config',
+      $this->client,
+      $this->createMock(CacheTagsChecksumInterface::class),
+      new PhpSerialize(),
+      $this->buffer,
+    );
+    $consistent->setPrefix(self::PREFIX);
+    $consistent->setMultiple(['system.site' => ['data' => 'new value']]);
+
+    $this->buffer->flush();
+
+    $this->assertGreaterThan(
+      1000.0,
+      (float) $this->client->data[self::MARKER],
+      'The bin has to be announced, or other nodes keep the copy they primed before the write.',
+    );
   }
 
 }

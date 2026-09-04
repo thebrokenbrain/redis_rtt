@@ -179,8 +179,14 @@ class CommandBufferTest extends UnitTestCase {
     $buffer->queueWrite('p:config:system.theme', ['cid' => 'system.theme'], NULL);
     $buffer->flush();
 
-    $this->assertSame(['hmset', 'hmset', 'set'], $this->client->log, 'The marker must be the last command of the pipeline.');
-    $this->assertSame(1, $this->client->roundTrips, 'A marker must not cost a round trip of its own.');
+    $this->assertSame(['hmset', 'hmset', 'set'], $this->client->log, 'The marker must be sent after the writes it describes.');
+    // Two trips, deliberately. A marker inside the data pipeline is stamped
+    // before Redis has applied that pipeline, so it can claim a moment earlier
+    // than its own data became readable - measured at 7.4 ms for 512 entries of
+    // 8 KB. The second trip buys a timestamp that cannot precede visibility,
+    // and it is spent in the shutdown function, after
+    // fastcgi_finish_request(), where nobody is waiting for it.
+    $this->assertSame(2, $this->client->roundTrips, 'The marker is sent after the pipeline it describes, not inside it.');
   }
 
   /**

@@ -140,6 +140,9 @@ final class FakeRedisClient implements ClientInterface {
         // TTLs are not simulated; nothing here depends on eviction.
         return TRUE;
 
+      case 'exists':
+        return isset($this->data[$args[0]]) ? 1 : 0;
+
       case 'get':
         $value = $this->data[$args[0]] ?? FALSE;
         return is_array($value) ? FALSE : $value;

@@ -64,6 +64,16 @@ class CommandBuffer implements CommandBufferInterface {
   protected array $markers = [];
 
   /**
+   * Marker key of every chained-fast bin that has queued a write, by prefix.
+   *
+   * Needed because a bin can go a whole process without core handing over a
+   * marker, and a buffered write still has to be announced. See ::flush().
+   *
+   * @var array<string, string>
+   */
+  protected array $bins = [];
+
+  /**
    * Whether the shutdown flush has been registered.
    */
   protected bool $shutdownRegistered = FALSE;
@@ -161,6 +171,22 @@ class CommandBuffer implements CommandBufferInterface {
   }
 
   /**
+   * Records which marker key describes a bin that is buffering writes.
+   *
+   * A bin can go a whole process without core handing over a marker - on
+   * Drupal 11.2 markAsOutdated() skips the write while the published stamp is
+   * still in the future - and a buffered write still has to be announced.
+   *
+   * @param string $prefix
+   *   The key prefix of the bin.
+   * @param string $marker_key
+   *   The fully prefixed Redis key of that bin's chained-fast marker.
+   */
+  public function registerBin(string $prefix, string $marker_key): void {
+    $this->bins[$prefix] = $marker_key;
+  }
+
+  /**
    * Queues a chained-fast "last write timestamp" marker.
    *
    * \Drupal\Core\Cache\ChainedFastBackend keeps one timestamp per bin in the
@@ -189,6 +215,10 @@ class CommandBuffer implements CommandBufferInterface {
    * @param string $prefix
    *   The key prefix of the bin this marker describes, so that a later write to
    *   that bin can re-arm it.
+   */
+
+  /**
+   * {@inheritdoc}
    */
   public function queueMarker(string $key, float $value, string $prefix): void {
     $this->markers[$key] = [
@@ -392,19 +422,35 @@ class CommandBuffer implements CommandBufferInterface {
       return;
     }
 
-    // The marker must claim a moment no earlier than the writes it travels
-    // with, and those only become visible now. Same millisecond handling as
-    // core's ChainedFastBackend::markAsOutdated(), for the same reason: an
-    // entry another node stamped earlier in this millisecond may predate them.
-    $stamp = round(microtime(TRUE) + .001, 3);
-    $markers = [];
+    $dirty = [];
     foreach ($this->markers as $key => $marker) {
       if ($marker['dirty']) {
-        $markers[$key] = max($marker['value'], $stamp);
+        $dirty[$key] = $marker['value'];
       }
     }
 
-    if (!$this->writes && !$markers) {
+    // Bins with pending writes whose marker this process has never been handed.
+    // Core 11.2's ChainedFastBackend::markAsOutdated() stamps 50 ms ahead and
+    // then skips the write while that stamp is still in the future, so a
+    // buffered write can otherwise land with no marker at all - and every other
+    // node goes on serving the copy it primed before it. Asking whether the bin
+    // has a marker at all costs nothing here: it rides in the data pipeline.
+    $probe = [];
+    if ($this->writes) {
+      foreach ($this->bins as $prefix => $marker_key) {
+        if (isset($this->markers[$marker_key])) {
+          continue;
+        }
+        foreach (array_keys($this->writes) as $key) {
+          if (str_starts_with($key, $prefix)) {
+            $probe[$marker_key] = $prefix;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!$this->writes && !$dirty) {
       return;
     }
 
@@ -421,18 +467,55 @@ class CommandBuffer implements CommandBufferInterface {
           $client->expire($key, $write['ttl']);
         }
       }
-      // Last in the pipeline, always: Redis runs the commands in the order they
-      // arrive, so a reader can see the data without the marker - harmless, it
-      // just costs that reader one more round trip later - but never the marker
-      // without the data.
-      foreach ($markers as $key => $value) {
-        $client->set($key, $value);
+      foreach (array_keys($probe) as $marker_key) {
+        $client->exists($marker_key);
       }
-      $client->exec();
-      // Only now is the copy in Redis known to cover what was queued. If the
-      // pipeline threw, the markers stay dirty and the next flush retries them.
-      foreach (array_keys($markers) as $key) {
-        $this->markers[$key]['dirty'] = FALSE;
+      $replies = $client->exec();
+
+      // Only now is the data readable by anyone else, so this is the earliest
+      // moment a marker may claim. Stamping before the pipeline - which is what
+      // this did - let the marker predate its own writes by however long the
+      // transmission took: measured at 7.4 ms for 512 entries of 8 KB, and
+      // 53 ms at 64 KB. A node that primed its fast backend inside that window
+      // stamped its pre-write copy later than the marker and kept it for good.
+      $stamp = round(microtime(TRUE) + .001, 3);
+
+      $publish = [];
+      foreach ($dirty as $key => $value) {
+        $publish[$key] = max($value, $stamp);
+      }
+
+      // The exists() replies arrive after one reply per data command, in the
+      // order they were queued.
+      $offset = is_array($replies) ? count($replies) - count($probe) : -1;
+      $index = 0;
+      foreach ($probe as $marker_key => $prefix) {
+        if ($offset >= 0 && !empty($replies[$offset + $index])) {
+          $publish[$marker_key] = $stamp;
+          $this->markers[$marker_key] = [
+            'value' => $stamp,
+            'prefix' => $prefix,
+            'dirty' => TRUE,
+          ];
+        }
+        $index++;
+      }
+
+      if ($publish) {
+        // A second trip, deliberately. A marker sent inside the data pipeline
+        // is stamped before Redis has applied that pipeline, which is the whole
+        // defect. This runs from the shutdown function, after
+        // fastcgi_finish_request(), so the extra wait is nobody's.
+        $client->pipeline();
+        foreach ($publish as $key => $value) {
+          $client->set($key, $value);
+        }
+        $client->exec();
+        foreach (array_keys($publish) as $key) {
+          if (isset($this->markers[$key])) {
+            $this->markers[$key]['dirty'] = FALSE;
+          }
+        }
       }
       $this->flushCount++;
     }

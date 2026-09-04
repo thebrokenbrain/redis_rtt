@@ -8,6 +8,7 @@ use Drupal\Component\Assertion\Inspector;
 use Drupal\Component\Serialization\SerializationInterface;
 use Drupal\Core\Cache\Cache;
 use Drupal\Core\Cache\CacheBackendInterface;
+use Drupal\Core\Cache\ChainedFastBackend;
 use Drupal\Core\Cache\CacheTagsChecksumInterface;
 use Drupal\Core\Site\Settings;
 use Drupal\redis_rtt\Redis\CommandBufferInterface;
@@ -169,6 +170,19 @@ LUA;
   }
 
   /**
+   * The Redis key of this bin's chained-fast "last write timestamp" marker.
+   *
+   * Built exactly as the stock backend builds it, so the two agree on where it
+   * lives.
+   *
+   * @return string
+   *   The fully prefixed key.
+   */
+  protected function markerKey(): string {
+    return $this->getPrefix() . ':' . ChainedFastBackend::LAST_WRITE_TIMESTAMP_PREFIX . 'cache_' . $this->bin;
+  }
+
+  /**
    * {@inheritdoc}
    *
    * Only the "last write timestamp" marker is handled here; everything else
@@ -216,6 +230,13 @@ LUA;
    *   The items to write, keyed by cache ID.
    */
   public function setMultiple(array $items): void {
+    // Tells the buffer which marker describes this bin, so a write can still be
+    // announced when core never hands a marker over - which is what core 11.2
+    // does while the published stamp is still in the future.
+    if ($this->buffer->isEnabled()) {
+      $this->buffer->registerBin($this->getKey() . ':', $this->markerKey());
+    }
+
     if (!$this->buffer->isEnabled()) {
       parent::setMultiple($items);
       return;
