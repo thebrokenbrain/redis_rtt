@@ -24,7 +24,12 @@ use Drupal\redis\Client\PhpRedis;
  * confirm which settings are in force, so one that names the wrong client
  * invites someone to "fix" a configuration that was already correct.
  *
+ * The client is a phpredis client, so naming it needs a \Redis to hand it -
+ * even a mocked one. Without the extension there is no class to mock, and the
+ * test has nothing to say rather than something to fail about.
+ *
  * @group redis_rtt
+ * @requires extension redis
  */
 class ClientNamingTest extends UnitTestCase {
 

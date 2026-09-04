@@ -9,8 +9,21 @@ include:
       - '/includes/include.drupalci.workflows.yml'
 
 variables:
-  OPT_IN_TEST_NEXT_MAJOR: '1'
+  # The declared range is ^10.3 || ^11, so both halves have to be tested:
+  # previous major covers the Drupal 10 claim, previous minor the release
+  # before current stable. Every opt-in needs its own _AUTORUN_ - without one
+  # the job is created as a play button nobody presses.
   OPT_IN_TEST_PREVIOUS_MINOR: '1'
+  _AUTORUN_PREVIOUS_MINOR: 'all'
+  OPT_IN_TEST_PREVIOUS_MAJOR: '1'
+  _AUTORUN_PREVIOUS_MAJOR: 'all'
+  # Drupal 12 is deliberately outside the declared range. The next major job
+  # installs it anyway and is allowed to fail, so it is early warning rather
+  # than a gate. redis has to be listed for the lenient plugin or the
+  # dependency blocks the install before this module is even reached.
+  OPT_IN_TEST_NEXT_MAJOR: '1'
+  _AUTORUN_NEXT_MAJOR: 'all'
+  _LENIENT_ALLOW_LIST: 'redis'
   # The unit tests are the ones that run everywhere. The kernel tests need a
   # reachable Redis and skip themselves without one.
   _PHPUNIT_EXTRA: '--group redis_rtt'
@@ -22,5 +35,9 @@ phpunit:
     REDIS_HOST: redis
     REDIS_PORT: '6379'
   services:
+    # The reference keeps the database and Chrome the template sets up: a bare
+    # services list replaces the inherited one instead of adding to it, which
+    # would leave the kernel tests without a database.
+    - !reference [.testing-job-base, services]
     - name: redis:7-alpine
       alias: redis

@@ -1,0 +1,11 @@
+# Keep development-only files out of the packaged release. Drupal.org packages
+# with git-archive, which honours this; a git clone still gets everything.
+#
+# Nothing needed at runtime belongs here: the .services.example.yml is loaded
+# from settings.php on a real site, so it ships.
+/tests              export-ignore
+/.gitattributes     export-ignore
+/.gitignore         export-ignore
+/.gitlab-ci.yml     export-ignore
+/phpcs.xml.dist     export-ignore
+/phpstan.neon.dist  export-ignore
