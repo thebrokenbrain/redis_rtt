@@ -16,6 +16,18 @@ use Drupal\redis\ClientFactory;
 class CommandBufferTest extends UnitTestCase {
 
   /**
+   * The key ChainedFastBackend keeps the config bin's timestamp under.
+   *
+   * Outside the bin's own key space, exactly as the stock backend writes it.
+   */
+  protected const CONFIG_MARKER = 'p:last_write_timestamp_cache_config';
+
+  /**
+   * The same, for a second bin.
+   */
+  protected const DISCOVERY_MARKER = 'p:last_write_timestamp_cache_discovery';
+
+  /**
    * The fake Redis client the buffer writes to.
    */
   protected FakeRedisClient $client;
@@ -151,6 +163,96 @@ class CommandBufferTest extends UnitTestCase {
 
     $buffer->flush();
     $this->assertSame('0', $this->client->data['bin:k']['valid']);
+  }
+
+  /**
+   * A marker must leave behind the data it describes, in the same pipeline.
+   *
+   * @covers ::queueMarker
+   * @covers ::flush
+   */
+  public function testMarkersAreSentAfterTheWritesTheyDescribe(): void {
+    $buffer = $this->buffer();
+
+    $buffer->queueWrite('p:config:system.site', ['cid' => 'system.site'], NULL);
+    $buffer->queueMarker(self::CONFIG_MARKER, 1.0, 'p:config:');
+    $buffer->queueWrite('p:config:system.theme', ['cid' => 'system.theme'], NULL);
+    $buffer->flush();
+
+    $this->assertSame(['hmset', 'hmset', 'set'], $this->client->log, 'The marker must be the last command of the pipeline.');
+    $this->assertSame(1, $this->client->roundTrips, 'A marker must not cost a round trip of its own.');
+  }
+
+  /**
+   * A marker carries the moment it was sent, not the moment it was queued.
+   *
+   * Ordering alone is not enough. Another web node that reads this bin while
+   * the write is still queued takes the old value and stamps its own fast
+   * backend copy with the time it read - which is later than any timestamp
+   * captured before the flush. ChainedFastBackend keeps a copy that is newer
+   * than the marker, so that node would serve the pre-write value for as long
+   * as nothing else touches the bin.
+   *
+   * @covers ::queueMarker
+   * @covers ::flush
+   */
+  public function testMarkersAreStampedWhenTheyAreSent(): void {
+    $buffer = $this->buffer();
+    $buffer->queueWrite('p:config:system.site', ['cid' => 'system.site'], NULL);
+    $buffer->queueMarker(self::CONFIG_MARKER, round(microtime(TRUE) + .001, 3), 'p:config:');
+
+    // Stand in for the other node's read: everything queued is still invisible.
+    $primed_at = round(microtime(TRUE), 3);
+    $buffer->flush();
+
+    $this->assertGreaterThan($primed_at, (float) $this->client->data[self::CONFIG_MARKER]);
+  }
+
+  /**
+   * A write re-arms its own bin's marker, and only its own.
+   *
+   * Core rewrites the timestamp only once the clock has passed the one it
+   * already published, which on Drupal 11.2 is a 50ms window. A second flush
+   * can therefore carry writes that no fresh marker accompanies, and the buffer
+   * has to republish the marker itself or those writes go out described by a
+   * timestamp older than they are. Republishing a bin nobody wrote to would
+   * cost the other nodes their fast backend copies for nothing.
+   *
+   * @covers ::queueWrite
+   * @covers ::flush
+   */
+  public function testWritesRepublishOnlyTheirOwnBinsMarker(): void {
+    $buffer = $this->buffer();
+    $buffer->queueMarker(self::CONFIG_MARKER, 1.0, 'p:config:');
+    $buffer->queueMarker(self::DISCOVERY_MARKER, 1.0, 'p:discovery:');
+    $buffer->flush();
+
+    // Both markers are up to date. Removing them makes anything the next flush
+    // writes unmistakably a republication.
+    unset($this->client->data[self::CONFIG_MARKER], $this->client->data[self::DISCOVERY_MARKER]);
+
+    $buffer->queueWrite('p:config:system.site', ['cid' => 'system.site'], NULL);
+    $buffer->flush();
+
+    $this->assertArrayHasKey(self::CONFIG_MARKER, $this->client->data, 'The written bin needs a marker at least as new as the write.');
+    $this->assertArrayNotHasKey(self::DISCOVERY_MARKER, $this->client->data, 'An untouched bin must be left alone.');
+  }
+
+  /**
+   * A marker with nothing to accompany it still gets sent.
+   *
+   * A request that only deletes never queues a write, but ChainedFastBackend
+   * still marks the bin as outdated, and that has to reach the other nodes.
+   *
+   * @covers ::flush
+   */
+  public function testMarkerWithNoWritesIsStillFlushed(): void {
+    $buffer = $this->buffer();
+    $buffer->queueMarker(self::CONFIG_MARKER, 1.0, 'p:config:');
+    $buffer->flush();
+
+    $this->assertArrayHasKey(self::CONFIG_MARKER, $this->client->data);
+    $this->assertSame(1, $this->client->roundTrips);
   }
 
   /**

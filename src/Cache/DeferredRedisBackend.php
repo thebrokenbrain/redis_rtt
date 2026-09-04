@@ -6,6 +6,7 @@ namespace Drupal\redis_rtt\Cache;
 
 use Drupal\Component\Assertion\Inspector;
 use Drupal\Component\Serialization\SerializationInterface;
+use Drupal\Core\Cache\Cache;
 use Drupal\Core\Cache\CacheBackendInterface;
 use Drupal\Core\Cache\CacheTagsChecksumInterface;
 use Drupal\Core\Site\Settings;
@@ -40,6 +41,11 @@ use Drupal\redis\ClientInterface;
  * 5. The double-prefixing bug in the stock ::setMultiple() expired-item path is
  *    fixed (it passes an already-prefixed key to ::delete(), which prefixes it
  *    again and deletes a key that cannot exist).
+ *
+ * 6. The chained-fast "last write timestamp" marker is buffered along with the
+ *    data instead of being written immediately, because a marker that is
+ *    visible before the write it announces makes every other web node cache the
+ *    old value as if it were fresh. See ::set().
  */
 class DeferredRedisBackend extends RedisBackend {
 
@@ -160,6 +166,47 @@ LUA;
     $cids = array_diff($cids, array_keys($return));
 
     return $return;
+  }
+
+  /**
+   * {@inheritdoc}
+   *
+   * Only the "last write timestamp" marker is handled here; everything else
+   * goes to ::setMultiple() through the stock method.
+   *
+   * \Drupal\Core\Cache\ChainedFastBackend writes that marker through this
+   * method after every write, delete and invalidation of the bin, and the stock
+   * backend answers it with an immediate SET that bypasses the cache API. That
+   * is correct only while the data is written synchronously too. With the data
+   * in the buffer, an immediate marker announces to the other web nodes a write
+   * they cannot read yet: they drop their own fast-backend copy, re-prime it
+   * from Redis with the *old* value, stamp it later than the marker, and then
+   * keep serving it - no cache tag invalidation and no rebuild on this node
+   * moves that marker again. Queue it instead, so it leaves in the same
+   * pipeline as the data and behind it.
+   *
+   * @param string $cid
+   *   The cache ID.
+   * @param mixed $data
+   *   The data to store.
+   * @param int $expire
+   *   A Unix timestamp, or Cache::PERMANENT.
+   * @param string[] $tags
+   *   The cache tags.
+   */
+  public function set($cid, $data, $expire = Cache::PERMANENT, array $tags = []): void {
+    if ($this->buffer->isEnabled() && $this->isLastWriteTimestamp($cid)) {
+      $this->buffer->queueMarker(
+        // The stock backend stores the marker outside the bin's own key space,
+        // so mirror its key exactly or ::get() will not find it.
+        $this->getPrefix() . ':' . $cid,
+        (float) $data,
+        $this->getKey() . ':',
+      );
+      return;
+    }
+
+    parent::set($cid, $data, $expire, $tags);
   }
 
   /**

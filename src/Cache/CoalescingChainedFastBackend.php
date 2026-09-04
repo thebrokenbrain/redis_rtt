@@ -19,10 +19,22 @@ use Drupal\Core\Cache\ChainedFastBackend;
  * operation itself.
  *
  * This subclass keeps the first marker write exactly where core puts it, so the
- * "this bin changed" signal reaches other web nodes just as early as before,
- * and coalesces every subsequent write of the same request into a single one at
- * shutdown carrying the final timestamp. Worst case is therefore two marker
- * writes per bin per request instead of N, with the same visibility guarantee.
+ * "this bin changed" signal is handed to the consistent backend just as early
+ * as before, and coalesces every subsequent write of the same request into a
+ * single one at shutdown carrying the final timestamp. Worst case is therefore
+ * two marker writes per bin per request instead of N.
+ *
+ * When the marker actually reaches Redis is the consistent backend's business,
+ * and it matters: a marker that arrives before the data it describes is worse
+ * than no marker at all, because it makes the other web nodes re-prime their
+ * fast backends from a Redis that still holds the old value. With
+ * \Drupal\redis_rtt\Cache\DeferredRedisBackend underneath, both marker writes
+ * are queued in the shared command buffer and leave behind the data. This class
+ * registers its shutdown callback from the constructor, before the buffer
+ * registers its own flush, so the coalesced second marker is queued in time to
+ * travel in that same pipeline rather than costing a pipeline of its own.
+ *
+ * @see \Drupal\redis_rtt\Redis\CommandBuffer::queueMarker()
  */
 class CoalescingChainedFastBackend extends ChainedFastBackend {
 
@@ -38,7 +50,10 @@ class CoalescingChainedFastBackend extends ChainedFastBackend {
 
   public function __construct(CacheBackendInterface $consistent_backend, CacheBackendInterface $fast_backend, $bin) {
     parent::__construct($consistent_backend, $fast_backend, $bin);
-    // The bootstrap, config and discovery bins are built early enough that
+    // Registered here rather than when a marker is first deferred, so that this
+    // callback runs before any flush the consistent backend registers later:
+    // the marker is then queued in time to join that flush instead of trailing
+    // it. The bootstrap, config and discovery bins are built early enough that
     // core/includes/bootstrap.inc may not be loaded yet.
     if (function_exists('drupal_register_shutdown_function')) {
       drupal_register_shutdown_function([$this, 'flushMarker']);
@@ -61,7 +76,8 @@ class CoalescingChainedFastBackend extends ChainedFastBackend {
     $this->lastWriteTimestamp = $now;
 
     if (!$this->markerPublished) {
-      // First write of the request behaves exactly like core.
+      // First write of the request goes to the consistent backend immediately,
+      // exactly like core.
       $this->markerPublished = TRUE;
       $this->writeMarker();
       return;

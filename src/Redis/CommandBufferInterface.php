@@ -41,6 +41,26 @@ interface CommandBufferInterface {
   public function queueWrite(string $key, array $hash, ?int $ttl): void;
 
   /**
+   * Queues a chained-fast "last write timestamp" marker.
+   *
+   * Implementations must send markers after every queued write and stamp them
+   * with the moment they are sent. A marker that reaches Redis ahead of the
+   * data it describes tells the other web nodes to re-prime their fast backends
+   * from a Redis that does not hold the new value yet, and the copy they take
+   * then outlives the marker.
+   *
+   * @param string $key
+   *   The fully prefixed Redis key of the marker.
+   * @param float $value
+   *   The timestamp the caller wants published, treated as a lower bound.
+   * @param string $prefix
+   *   The key prefix of the bin this marker describes.
+   *
+   * @see \Drupal\redis_rtt\Redis\CommandBuffer::queueMarker()
+   */
+  public function queueMarker(string $key, float $value, string $prefix): void;
+
+  /**
    * Returns a pending write, if any.
    *
    * Lets a backend answer a read from the buffer, so read-your-own-writes
@@ -58,7 +78,8 @@ interface CommandBufferInterface {
    * Drops pending writes for the given keys.
    *
    * Must be called before a delete reaches Redis, so a buffered write cannot
-   * resurrect a deleted entry.
+   * resurrect an entry this process deleted. The guarantee stops at the process
+   * boundary: a delete issued elsewhere during the buffer window is not seen.
    *
    * @param string[] $keys
    *   Fully prefixed Redis keys.

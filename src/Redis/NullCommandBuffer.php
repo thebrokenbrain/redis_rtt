@@ -33,6 +33,13 @@ class NullCommandBuffer implements CommandBufferInterface {
   /**
    * {@inheritdoc}
    */
+  public function queueMarker(string $key, float $value, string $prefix): void {
+    throw new \LogicException('NullCommandBuffer must never receive markers; check isEnabled() first.');
+  }
+
+  /**
+   * {@inheritdoc}
+   */
   public function getPendingHash(string $key): ?array {
     return NULL;
   }

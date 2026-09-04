@@ -26,8 +26,14 @@ use Drupal\redis\ClientInterface;
  *   - Deletes and invalidations can be resolved against pending writes without
  *     touching the network at all.
  *
- * Ordering is preserved for correctness: a delete of a pending key drops the
- * pending write instead of racing with it.
+ * Ordering is preserved for correctness within this process: a delete of a
+ * pending key drops the pending write instead of racing with it. Deletes issued
+ * by *other* processes are not seen; ::flush() documents what that costs.
+ *
+ * Chained-fast "last write timestamp" markers are queued here too, and are
+ * always sent after the writes, in the same pipeline. ::queueMarker() explains
+ * why publishing a marker ahead of its data is the one reordering that cannot
+ * be tolerated.
  *
  * Durability note: buffered entries are cache data only. If the PHP worker dies
  * before shutdown the entries are simply not written and are recomputed on the
@@ -44,6 +50,18 @@ class CommandBuffer implements CommandBufferInterface {
    * @var array<string, array{hash: array<string, mixed>, ttl: int|null}>
    */
   protected array $writes = [];
+
+  /**
+   * Pending "last write timestamp" markers, keyed by the fully prefixed key.
+   *
+   * Kept for the life of the process rather than dropped once sent: 'dirty'
+   * says whether the copy in Redis still covers everything this process has
+   * queued for that bin, and 'value' is the highest timestamp any caller has
+   * asked for, so a marker can never be published moving backwards.
+   *
+   * @var array<string, array{value: float, prefix: string, dirty: bool}>
+   */
+  protected array $markers = [];
 
   /**
    * Whether the shutdown flush has been registered.
@@ -126,22 +144,166 @@ class CommandBuffer implements CommandBufferInterface {
     }
     $this->writes[$key] = ['hash' => $hash, 'ttl' => $ttl];
 
-    if (!$this->shutdownRegistered) {
-      $this->shutdownRegistered = TRUE;
-      // Runs after fastcgi_finish_request(), so these round trips are off the
-      // critical path of the response the user is waiting for. Falls back to
-      // the plain PHP function because this object can be built before
-      // core/includes/bootstrap.inc has been loaded.
-      if (function_exists('drupal_register_shutdown_function')) {
-        drupal_register_shutdown_function([$this, 'flush']);
-      }
-      else {
-        register_shutdown_function([$this, 'flush']);
+    // This entry becomes visible to the rest of the cluster when it is sent,
+    // which is later than the timestamp any marker for its bin is carrying
+    // right now. Re-arm that marker so it is republished with the write.
+    foreach ($this->markers as $marker_key => $marker) {
+      if (!$marker['dirty'] && str_starts_with($key, $marker['prefix'])) {
+        $this->markers[$marker_key]['dirty'] = TRUE;
       }
     }
 
+    $this->registerShutdownFlush();
+
     if (count($this->writes) >= $this->maxPending) {
       $this->flush();
+    }
+  }
+
+  /**
+   * Queues a chained-fast "last write timestamp" marker.
+   *
+   * \Drupal\Core\Cache\ChainedFastBackend keeps one timestamp per bin in the
+   * consistent backend and throws away every fast-backend entry older than it.
+   * The marker is therefore a promise to the other web nodes: everything
+   * written to this bin before this moment is already readable here. Deferring
+   * the data without deferring the marker breaks that promise in the worst
+   * possible way. Another node reads the marker, discards its own copy as
+   * stale, re-primes it from a Redis that does not hold the new value yet, and
+   * stamps the re-primed copy *later* than the marker. Nothing moves the marker
+   * again, so that node serves pre-write data until something else writes to
+   * the bin - which cache tag invalidation and a cache rebuild on the writing
+   * node will not fix.
+   *
+   * Two things are needed to close that, and neither is sufficient alone:
+   *   - The marker leaves after every queued write, in the same pipeline, so it
+   *     can never be visible before the data it describes.
+   *   - Its value is raised to the moment it is actually sent, because a
+   *     timestamp taken when the write was queued is still older than a copy
+   *     another node primed while the write sat in this buffer.
+   *
+   * @param string $key
+   *   The fully prefixed Redis key of the marker.
+   * @param float $value
+   *   The timestamp the caller wants published, treated as a lower bound.
+   * @param string $prefix
+   *   The key prefix of the bin this marker describes, so that a later write to
+   *   that bin can re-arm it.
+   */
+  public function queueMarker(string $key, float $value, string $prefix): void {
+    $this->markers[$key] = [
+      'value' => max($this->markers[$key]['value'] ?? 0.0, $value),
+      'prefix' => $prefix,
+      'dirty' => TRUE,
+    ];
+
+    // Armed before the immediate path too, not only on the deferred one: if the
+    // write below fails - a failover, a moment of READONLY on a replica - the
+    // marker stays dirty and something has to come back for it. Without this,
+    // a process whose only buffered work was a bin clear would end with the bin
+    // cleared in Redis and its marker never published.
+    $this->registerShutdownFlush();
+
+    // A marker only has to wait when this buffer is holding data for its bin
+    // that the marker would otherwise announce before it is readable. With
+    // nothing pending there is nothing to be ordered behind, and waiting is
+    // actively harmful: core writes this marker from ::delete(),
+    // ::invalidate() and ::deleteAll() too, and those reach Redis immediately.
+    // Holding their marker back withholds the invalidation from every other
+    // web node - for the rest of the process, since nothing flushes a marker on
+    // its own - while they keep serving what was just cleared.
+    if (!$this->hasPendingWritesFor($prefix)) {
+      $this->flushMarkers();
+    }
+  }
+
+  /**
+   * Whether any buffered write belongs to the given bin.
+   *
+   * @param string $prefix
+   *   The key prefix of the bin.
+   *
+   * @return bool
+   *   TRUE when at least one pending write would be announced by that bin's
+   *   marker.
+   */
+  protected function hasPendingWritesFor(string $prefix): bool {
+    foreach (array_keys($this->writes) as $key) {
+      if (str_starts_with($key, $prefix)) {
+        return TRUE;
+      }
+    }
+    return FALSE;
+  }
+
+  /**
+   * Publishes the markers that have nothing buffered to wait for.
+   *
+   * A marker whose bin does have pending writes is deliberately left alone: it
+   * is waiting for them, and publishing it here would announce them before
+   * Redis holds them, which is the whole failure this class exists to prevent.
+   * So this is per bin, never "every dirty marker" - a delete in one bin must
+   * not drag another bin's marker out ahead of its data.
+   *
+   * The write costs one round trip, exactly what the stock backend would have
+   * spent, and for the same reason: the other web nodes cannot be left
+   * believing their copy of a bin that was just cleared is still current.
+   */
+  protected function flushMarkers(): void {
+    if ($this->flushing) {
+      return;
+    }
+
+    $dirty = array_filter(
+      $this->markers,
+      fn (array $marker): bool => $marker['dirty'] && !$this->hasPendingWritesFor($marker['prefix']),
+    );
+    if (!$dirty) {
+      return;
+    }
+
+    $stamp = round(microtime(TRUE) + .001, 3);
+    try {
+      $client = $this->getClient();
+      foreach ($dirty as $key => $marker) {
+        $client->set($key, max($marker['value'], $stamp));
+        $this->markers[$key]['dirty'] = FALSE;
+      }
+    }
+    catch (\Exception $e) {
+      // Left dirty, so a later flush retries it. Never fatal, for the same
+      // reason a failed pipeline is not: this is cache metadata, and the cost
+      // of losing it is a re-read.
+      if (Settings::get('redis_rtt_log_errors', FALSE)) {
+        // phpcs:ignore Drupal.Semantics.FunctionTriggerError
+        trigger_error('redis_rtt: marker write failed: ' . $e->getMessage(), E_USER_WARNING);
+      }
+    }
+  }
+
+  /**
+   * Makes sure a flush will happen before the process ends.
+   *
+   * The registration is repeated after every flush, so that anything queued
+   * once the buffer has already been drained - a cache write from a later
+   * shutdown function, or a marker the chained-fast backend defers - still gets
+   * a pipeline of its own. PHP appends functions registered during shutdown to
+   * the list it is walking, so they do run.
+   */
+  protected function registerShutdownFlush(): void {
+    if ($this->shutdownRegistered) {
+      return;
+    }
+    $this->shutdownRegistered = TRUE;
+    // Runs after fastcgi_finish_request(), so these round trips are off the
+    // critical path of the response the user is waiting for. Falls back to
+    // the plain PHP function because this object can be built before
+    // core/includes/bootstrap.inc has been loaded.
+    if (function_exists('drupal_register_shutdown_function')) {
+      drupal_register_shutdown_function([$this, 'flush']);
+    }
+    else {
+      register_shutdown_function([$this, 'flush']);
     }
   }
 
@@ -162,7 +324,8 @@ class CommandBuffer implements CommandBufferInterface {
    * Drops pending writes for the given keys.
    *
    * Called before a delete reaches Redis so that a buffered write cannot
-   * resurrect a deleted entry.
+   * resurrect an entry this process deleted. It can only inspect this
+   * process's own pending writes; see ::flush() for the cross-process case.
    *
    * @param string[] $keys
    *   Fully prefixed Redis keys.
@@ -210,11 +373,41 @@ class CommandBuffer implements CommandBufferInterface {
 
   /**
    * Sends every pending write as a single pipeline.
+   *
+   * Writes are replayed exactly as they were captured: there is no
+   * compare-and-set and no re-read of the key. A DEL issued by *another*
+   * process while an entry sat in this buffer is therefore undone here, which
+   * brings the entry back with its pre-delete data until it expires or is
+   * written again. Catching that would need a tombstone written by the deleter
+   * and read by this flush: memory on every delete, a lifetime that has to
+   * outlive the longest buffer window, and it would still miss deletes from
+   * processes that do not run this module, so it is deliberately not done.
+   * ::deleteAll() is not exposed to this - it stamps a marker that the backend
+   * compares against every entry's creation time when reading, so a resurrected
+   * entry older than the marker is ignored. A single-key delete has no
+   * equivalent marker.
    */
   public function flush(): void {
-    if ($this->flushing || !$this->writes) {
+    if ($this->flushing) {
       return;
     }
+
+    // The marker must claim a moment no earlier than the writes it travels
+    // with, and those only become visible now. Same millisecond handling as
+    // core's ChainedFastBackend::markAsOutdated(), for the same reason: an
+    // entry another node stamped earlier in this millisecond may predate them.
+    $stamp = round(microtime(TRUE) + .001, 3);
+    $markers = [];
+    foreach ($this->markers as $key => $marker) {
+      if ($marker['dirty']) {
+        $markers[$key] = max($marker['value'], $stamp);
+      }
+    }
+
+    if (!$this->writes && !$markers) {
+      return;
+    }
+
     $this->flushing = TRUE;
     $writes = $this->writes;
     $this->writes = [];
@@ -228,7 +421,19 @@ class CommandBuffer implements CommandBufferInterface {
           $client->expire($key, $write['ttl']);
         }
       }
+      // Last in the pipeline, always: Redis runs the commands in the order they
+      // arrive, so a reader can see the data without the marker - harmless, it
+      // just costs that reader one more round trip later - but never the marker
+      // without the data.
+      foreach ($markers as $key => $value) {
+        $client->set($key, $value);
+      }
       $client->exec();
+      // Only now is the copy in Redis known to cover what was queued. If the
+      // pipeline threw, the markers stay dirty and the next flush retries them.
+      foreach (array_keys($markers) as $key) {
+        $this->markers[$key]['dirty'] = FALSE;
+      }
       $this->flushCount++;
     }
     catch (\Exception $e) {
@@ -241,6 +446,8 @@ class CommandBuffer implements CommandBufferInterface {
     }
     finally {
       $this->flushing = FALSE;
+      // Anything queued from here on needs a flush of its own.
+      $this->shutdownRegistered = FALSE;
     }
   }
 
