@@ -402,13 +402,65 @@ class CommandBuffer implements CommandBufferInterface {
   }
 
   /**
+   * Applies a buffered write only when it would not undo a newer one.
+   *
+   * A buffered write carries the state captured when ::set() was called. Sent
+   * unconditionally it overwrites whatever another process wrote to that key in
+   * the meantime, and for bins whose entries carry no cache tags - cache_config
+   * above all, whose entries never expire - nothing would ever correct it: the
+   * database holds the new configuration and Redis the old one, permanently.
+   *
+   * Comparing the entry's own creation stamp is enough to order two writes, and
+   * it costs no round trip: the script travels in the same pipeline the write
+   * was already in.
+   *
+   * What this does NOT cover, and cannot without a tombstone: a key another
+   * process DELETED during the buffer window is absent, not newer, so the write
+   * recreates it. ::flush() documents that case.
+   */
+  private const WRITE_IF_NOT_NEWER = <<<'LUA'
+    local stored = redis.call('HGET', KEYS[1], 'created')
+    if stored and tonumber(stored) and tonumber(stored) > tonumber(ARGV[1]) then
+      return 0
+    end
+    redis.call('HMSET', KEYS[1], unpack(ARGV, 2))
+    return 1
+    LUA;
+
+  /**
+   * Flattens an entry into the argument list ::WRITE_IF_NOT_NEWER expects.
+   *
+   * @param string $key
+   *   The fully prefixed Redis key.
+   * @param array<string, mixed> $hash
+   *   The entry fields.
+   *
+   * @return array<int, string>
+   *   The key, the creation stamp to compare against, then field/value pairs.
+   */
+  protected function writeArguments(string $key, array $hash): array {
+    $arguments = [$key, (string) ($hash['created'] ?? 0)];
+    foreach ($hash as $field => $value) {
+      $arguments[] = (string) $field;
+      $arguments[] = (string) $value;
+    }
+    return $arguments;
+  }
+
+  /**
    * Sends every pending write as a single pipeline.
    *
-   * Writes are replayed exactly as they were captured: there is no
-   * compare-and-set and no re-read of the key. A DEL issued by *another*
-   * process while an entry sat in this buffer is therefore undone here, which
-   * brings the entry back with its pre-delete data until it expires or is
-   * written again. Catching that would need a tombstone written by the deleter
+   * Writes are replayed with one guard: ::WRITE_IF_NOT_NEWER refuses to
+   * overwrite an entry whose creation stamp is newer than the buffered one, so
+   * a write another process made during the buffer window survives. That is the
+   * case that used to be permanent, because entries in bins without cache tags
+   * - cache_config above all - never expire and nothing would correct them.
+   *
+   * A DEL issued by another process is still undone: an absent key is not a
+   * newer key, so the write recreates it with its pre-delete data until it
+   * expires or is written again. Distinguishing "deleted" from "never existed"
+   * needs a tombstone on every delete, which costs a key and a lifetime that
+   * has to outlive the longest buffer window. Catching that would need a tombstone written by the deleter
    * and read by this flush: memory on every delete, a lifetime that has to
    * outlive the longest buffer window, and it would still miss deletes from
    * processes that do not run this module, so it is deliberately not done.
@@ -462,7 +514,7 @@ class CommandBuffer implements CommandBufferInterface {
       $client = $this->getClient();
       $client->pipeline();
       foreach ($writes as $key => $write) {
-        $client->hMset($key, $write['hash']);
+        $client->eval(self::WRITE_IF_NOT_NEWER, $this->writeArguments($key, $write['hash']), 1);
         if (isset($write['ttl'])) {
           $client->expire($key, $write['ttl']);
         }

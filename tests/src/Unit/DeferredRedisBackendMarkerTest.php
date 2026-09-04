@@ -217,7 +217,7 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
     $this->client->resetCounters();
     $this->buffer->flush();
 
-    $this->assertSame(['hmset', 'set'], $this->client->log, 'The entry must be written before the marker.');
+    $this->assertSame(['eval', 'set'], $this->client->log, 'The entry must be written before the marker.');
     // The marker follows the data pipeline rather than riding in it, so that
     // its timestamp is taken once Redis has applied the writes. See
     // CommandBufferTest::testMarkersAreSentAfterTheWritesTheyDescribe().

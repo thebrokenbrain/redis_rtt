@@ -208,6 +208,23 @@ final class FakeRedisClient implements ClientInterface {
       return 0;
     }
 
+    // Buffered write, applied only when it would not undo a newer one.
+    if (str_contains($script, 'HMSET')) {
+      $key = $args[0];
+      $created = (float) $args[1];
+      $stored = $this->data[$key]['created'] ?? NULL;
+      if ($stored !== NULL && (float) $stored > $created) {
+        return 0;
+      }
+      $hash = [];
+      $pairs = array_slice($args, 2);
+      for ($i = 0; $i < count($pairs); $i += 2) {
+        $hash[$pairs[$i]] = (string) ($pairs[$i + 1] ?? '');
+      }
+      $this->data[$key] = $hash;
+      return 1;
+    }
+
     // Lock release.
     if (str_contains($script, 'DEL')) {
       [$key, $id] = $args;

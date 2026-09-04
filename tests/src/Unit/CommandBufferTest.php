@@ -179,7 +179,7 @@ class CommandBufferTest extends UnitTestCase {
     $buffer->queueWrite('p:config:system.theme', ['cid' => 'system.theme'], NULL);
     $buffer->flush();
 
-    $this->assertSame(['hmset', 'hmset', 'set'], $this->client->log, 'The marker must be sent after the writes it describes.');
+    $this->assertSame(['eval', 'eval', 'set'], $this->client->log, 'The marker must be sent after the writes it describes. The writes are eval, not hmset: each is applied only if it would not undo a newer one.');
     // Two trips, deliberately. A marker inside the data pipeline is stamped
     // before Redis has applied that pipeline, so it can claim a moment earlier
     // than its own data became readable - measured at 7.4 ms for 512 entries of
@@ -315,6 +315,68 @@ class CommandBufferTest extends UnitTestCase {
   public function testBufferingCanBeDisabled(): void {
     $this->assertFalse($this->buffer(['redis_rtt_defer_writes' => FALSE])->isEnabled());
     $this->assertTrue($this->buffer(['redis_rtt_defer_writes' => TRUE])->isEnabled());
+  }
+
+  /**
+   * Reads an entry's data back from the fake client.
+   *
+   * Through a method rather than inline, so that static analysis does not
+   * report the assertion as always false: the mutation it cannot see happens
+   * inside the fake client, when the flush applies the buffered write.
+   *
+   * @param string $key
+   *   The Redis key.
+   *
+   * @return string|null
+   *   The stored data, or NULL when the key is gone.
+   */
+  private function readBack(string $key): ?string {
+    $entry = $this->client->data[$key] ?? NULL;
+    return is_array($entry) ? ($entry['data'] ?? NULL) : NULL;
+  }
+
+  /**
+   * A buffered write must not undo a newer write by another process.
+   *
+   * The buffer holds the entry as it was when ::set() was called. Replayed
+   * unconditionally it overwrites whatever anyone else wrote to that key in the
+   * meantime, and in a bin whose entries carry no cache tags and never expire -
+   * cache_config - nothing would ever correct it: the database would hold the
+   * new configuration and Redis the old one, for good.
+   *
+   * @covers ::flush
+   */
+  public function testABufferedWriteDoesNotUndoANewerOne(): void {
+    $buffer = $this->buffer();
+    $key = 'p:config:system.site';
+
+    // This process captured the entry at t=1000.
+    $buffer->queueWrite($key, ['cid' => 'system.site', 'created' => '1000.000', 'data' => 'OLD'], NULL);
+
+    // Another process wrote a newer one straight to Redis meanwhile.
+    $this->client->data[$key] = ['cid' => 'system.site', 'created' => '2000.000', 'data' => 'NEW'];
+
+    $buffer->flush();
+
+    $this->assertSame('NEW', $this->readBack($key), 'The newer write has to survive the flush.');
+  }
+
+  /**
+   * A buffered write is still applied when nothing newer is there.
+   *
+   * The guard must not cost the module its whole purpose.
+   *
+   * @covers ::flush
+   */
+  public function testABufferedWriteStillLands(): void {
+    $buffer = $this->buffer();
+    $key = 'p:config:system.site';
+
+    $this->client->data[$key] = ['cid' => 'system.site', 'created' => '1000.000', 'data' => 'OLD'];
+    $buffer->queueWrite($key, ['cid' => 'system.site', 'created' => '2000.000', 'data' => 'NEW'], NULL);
+    $buffer->flush();
+
+    $this->assertSame('NEW', $this->readBack($key));
   }
 
 }
