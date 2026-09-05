@@ -93,6 +93,12 @@ $class_loader->addPsr4(
   __DIR__ . '/../../modules/contrib/redis_rtt/src',
 );
 
+// The redis module's own services, which everything below depends on. Without
+// this line a site that has not enabled the redis module yet - an initial
+// install above all - dies before the first install task with
+// "The service ... has a dependency on a non-existent service redis.factory".
+$settings['container_yamls'][] = 'modules/contrib/redis/redis.services.yml';
+
 $settings['redis.connection']['interface'] = 'FastPhpRedis';
 $settings['redis.connection']['persistent'] = TRUE;
 $settings['cache']['default'] = 'cache.backend.redis_rtt';
@@ -104,11 +110,20 @@ The `addPsr4()` call is needed because the classes named below are loaded
 before Drupal registers module namespaces. `$class_loader` is in scope inside
 `settings.php`.
 
-Both services files are listed because `settings.php` is read whether or not the
-module is installed. The overrides in the example file refer to services this
-module defines, so without its own services file alongside them, uninstalling the
-module - or an initial install, where settings are read before the module is
-enabled - fails with a `ServiceNotFoundException`.
+`redis.services.yml` has to come first, and it is the line most easily missed.
+Every service this module defines takes `@redis.factory` as an argument, and
+that service is defined by the redis module - so it has to be in the container
+before anything here is read, whether or not the redis module has been enabled
+yet. The redis module's own `settings.redis.example.php` adds the same line for
+the same reason ("Allow the services to work before the Redis module itself is
+enabled"). If you already configure Redis from that file, put the block below
+inside its `if (!InstallerKernel::installationAttempted() ...)` guard and the
+line is already there.
+
+Both of this module's services files are listed because `settings.php` is read
+whether or not the module is installed. The overrides in the example file refer
+to services this module defines, so without its own services file alongside
+them, uninstalling the module fails with a `ServiceNotFoundException`.
 
 ### Service overrides
 
@@ -183,9 +198,14 @@ The connection accepts these on top of the redis module's own: `tls`, `timeout`,
 `read_timeout` defaults to 1 second where stock phpredis waits forever, which is
 the point: an unbounded read turns a failover into an outage. But it is a limit
 on *every* reply, including ones you are deliberately waiting for.
-`RedisQueue::claimItem()` blocks on `brpoplpush` for up to 30 seconds and does
-not catch the exception, so a site using the redis module's queue backend must
-raise `read_timeout` above that queue's own timeout. Selecting `FastPhpRedis` is
+`RedisQueue::claimItem()` blocks on `brpoplpush` and does not catch the
+exception, so a site using the redis module's queue backend must raise
+`read_timeout` above that queue's own blocking timeout. That timeout is
+`$settings['redis_queue_<name>']['reserve_timeout']`, set per queue and `NULL`
+by default - and with `NULL` the queue uses a non-blocking `rpoplpush`, so a
+site that has never set it is not exposed at all. Do not read the `30` in
+`claimItem($lease_time = 30)` as the figure to beat: that is how long a claimed
+item stays leased, not how long the call blocks. Selecting `FastPhpRedis` is
 therefore an explicit choice: installing this module does not make it for you.
 
 `redis_rtt_report` only emits the header; the `redis-trips`, `redis-cmds` and
