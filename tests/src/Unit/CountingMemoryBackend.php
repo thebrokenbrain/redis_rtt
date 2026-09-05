@@ -39,11 +39,23 @@ final class CountingMemoryBackend implements CacheBackendInterface {
   public int $roundTrips = 0;
 
   /**
+   * Cache IDs written, in order, including repeats.
+   *
+   * Lets a test count how often a particular key was written rather than only
+   * what it ends up holding - which is the whole question when the subject is
+   * how many marker writes an operation costs.
+   *
+   * @var string[]
+   */
+  public array $written = [];
+
+  /**
    * Resets the counters, keeping the stored items.
    */
   public function resetCounters(): void {
     $this->gets = 0;
     $this->roundTrips = 0;
+    $this->written = [];
   }
 
   /**
@@ -132,6 +144,7 @@ final class CountingMemoryBackend implements CacheBackendInterface {
    *   The cache tags.
    */
   public function set($cid, $data, $expire = CacheBackendInterface::CACHE_PERMANENT, array $tags = []): void {
+    $this->written[] = $cid;
     $this->items[$cid] = (object) [
       'cid' => $cid,
       'data' => $data,
