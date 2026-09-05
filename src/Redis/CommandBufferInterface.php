@@ -68,6 +68,22 @@ interface CommandBufferInterface {
   public function queueMarker(string $key, float $value, string $prefix): void;
 
   /**
+   * Reports that a removal from the given bin has already reached Redis.
+   *
+   * A delete or an invalidation takes effect the moment it is issued, while a
+   * write waits in this buffer, so the two need opposite handling. The bin's
+   * marker cannot be published on its own - it would announce buffered writes
+   * before Redis holds them - and it cannot be left waiting either: nothing
+   * flushes a marker by itself, so every other web node keeps serving what was
+   * just removed until this process exits. Implementations resolve that by
+   * sending the pending writes and the marker together, in that order.
+   *
+   * @param string $prefix
+   *   The key prefix of the bin the removal was applied to.
+   */
+  public function announceRemoval(string $prefix): void;
+
+  /**
    * Returns a pending write, if any.
    *
    * Lets a backend answer a read from the buffer, so read-your-own-writes

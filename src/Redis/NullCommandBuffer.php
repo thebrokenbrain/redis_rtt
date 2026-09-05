@@ -44,6 +44,15 @@ class NullCommandBuffer implements CommandBufferInterface {
 
   /**
    * {@inheritdoc}
+   *
+   * Nothing is ever buffered here, so no removal can be stranded behind a
+   * write. Unlike the methods above this one is safe to call unconditionally,
+   * and the backend does: a delete does not check ::isEnabled() first.
+   */
+  public function announceRemoval(string $prefix): void {}
+
+  /**
+   * {@inheritdoc}
    */
   public function getPendingHash(string $key): ?array {
     return NULL;

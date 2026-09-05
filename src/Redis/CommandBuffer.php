@@ -248,6 +248,28 @@ class CommandBuffer implements CommandBufferInterface {
   }
 
   /**
+   * {@inheritdoc}
+   */
+  public function announceRemoval(string $prefix): void {
+    // Only a bin whose marker is dirty has anything stranded. A clean marker
+    // is already published, and a bin core never handed a marker for is not a
+    // chained-fast bin at all - forcing a flush there would buy nothing and
+    // cost the buffering this module exists for, on every CacheCollector
+    // invalidation of every request.
+    foreach ($this->markers as $marker) {
+      if ($marker['dirty'] && $marker['prefix'] === $prefix) {
+        // Sends the pending writes first and the marker behind them, so the
+        // ordering promise holds while the removal stops being a secret. Note
+        // that core skips ::markAsOutdated() entirely when the removal lands in
+        // the same millisecond as the write before it, so waiting to be handed
+        // a marker is not enough: the flush has to be driven from here.
+        $this->flush();
+        return;
+      }
+    }
+  }
+
+  /**
    * Whether any buffered write belongs to the given bin.
    *
    * @param string $prefix

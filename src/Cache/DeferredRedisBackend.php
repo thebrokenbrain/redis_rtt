@@ -333,6 +333,9 @@ LUA;
     // entry after the delete has already been sent.
     $this->buffer->dropWrites(array_map([$this, 'getKey'], $cids));
     parent::deleteMultiple($cids);
+    // The delete is on the wire now; nothing this buffer holds may outlive it
+    // unannounced.
+    $this->buffer->announceRemoval($this->getKey() . ':');
   }
 
   /**
@@ -362,6 +365,10 @@ LUA;
       $this->client->eval(static::INVALIDATE_LUA, [$key], 1);
     }
     $this->client->exec();
+    // Entries invalidated inside the buffer need no announcement - they were
+    // never sent - but these were, so the same rule as ::deleteMultiple()
+    // applies to them.
+    $this->buffer->announceRemoval($this->getKey() . ':');
   }
 
   /**
@@ -370,6 +377,7 @@ LUA;
   public function deleteAll(): void {
     $this->buffer->dropWritesByPrefix($this->getKey() . ':');
     parent::deleteAll();
+    $this->buffer->announceRemoval($this->getKey() . ':');
   }
 
   /**

@@ -175,19 +175,35 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
   }
 
   /**
-   * A delete after a queued write still leaves the marker behind the data.
+   * A delete takes the writes it would be stranded behind out with it.
    *
-   * The marker waits for pending data, and only for that. Publishing it early
-   * here would announce the queued write before Redis holds it.
+   * Neither of the two easy answers works here. Publishing the marker on its
+   * own would announce the queued write before Redis holds it - the defect the
+   * rest of this class is about. Withholding it is the same defect with a
+   * longer fuse: the delete is already applied, nothing flushes a marker by
+   * itself, and every other web node would go on serving what was just deleted
+   * until this process reached its pending-write limit or exited. For a request
+   * that is milliseconds; for cron, a queue worker or a config import it is
+   * minutes. Sending the data first and the marker behind it, in one pipeline,
+   * is what keeps both promises.
    *
    * @covers ::set
    */
-  public function testMarkerStillWaitsForDataQueuedBeforeTheDelete(): void {
+  public function testDeletesTakeBufferedWritesWithThem(): void {
     $bin = $this->configBin();
     $bin->set('system.site', 'new value', Cache::PERMANENT, self::TAGS);
+    $this->client->resetCounters();
+
     $bin->delete('other.thing');
 
-    $this->assertArrayNotHasKey(self::MARKER, $this->client->data, 'There is buffered data this marker would announce too early.');
+    $this->assertArrayHasKey(self::ENTRY, $this->client->data, 'The buffered write has to be sent, not abandoned.');
+    $this->assertArrayHasKey(self::MARKER, $this->client->data, 'A delete no other node is told about is a delete that did not happen for them.');
+
+    $wrote_entry = array_search('eval', $this->client->log, TRUE);
+    $wrote_marker = array_search('set', $this->client->log, TRUE);
+    $this->assertNotFalse($wrote_entry, 'The buffered entry should have been written.');
+    $this->assertNotFalse($wrote_marker, 'The marker should have been written.');
+    $this->assertLessThan($wrote_marker, $wrote_entry, 'The marker must still leave behind the data it announces.');
   }
 
   /**
