@@ -216,10 +216,12 @@ as the stock backend's, so nothing persists in an incompatible state.
 
 Six independent changes, all aimed at the same thing:
 
-- **Batched writes.** All cache writes of a request, across every bin, go out
-  as one pipeline at the end of the request - after `fastcgi_finish_request()`,
-  so they leave the critical path entirely. Repeated writes to a key are
-  deduplicated, and reads are answered from the buffer.
+- **Batched writes.** Cache writes of a request, across every bin, go out as one
+  pipeline at the end of the request - after `fastcgi_finish_request()`, so they
+  leave the critical path entirely. Repeated writes to a key are deduplicated,
+  and reads are answered from the buffer. Entries with neither an expiry nor a
+  cache tag are the exception and are written synchronously; see the FAQ on
+  buffering safety for why.
 - **No redirect hop on render cache hits.** `VariationCache` reads a cache ID,
   gets a `CacheRedirect` naming the real cache contexts, then reads again, and
   each hop waits for the one before it. That chain is structural, so its shape
@@ -294,6 +296,28 @@ is recomputed on the next request. Deletes, invalidations and cache tag
 invalidations are never buffered. Each entry's tag checksum is computed when
 `set()` is called rather than when the write is sent, so an invalidation that
 happens in between still wins.
+
+One case does not resolve that cleanly, and it is worth stating plainly. If
+*another* process deletes a key while this one is holding a buffered write for
+it, the flush recreates it: an absent key is not a newer key, so the guard that
+protects against overwriting a fresher entry cannot see the difference between
+"deleted" and "never existed". Distinguishing them needs a tombstone written by
+every delete, which costs memory on a path that currently costs nothing and
+would still miss deletes from processes that do not run this module.
+
+What makes that survivable is that the entries with no way of recovering from
+it are never buffered. An entry with neither an expiry nor a cache tag - a
+configuration object, above all, since `cache_config` is permanent by default
+and `CachedStorage` writes it untagged - would stay wrong until somebody
+rebuilt caches by hand, so those are written synchronously, exactly where the
+stock backend writes them. Everything else is bounded: it expires, or the next
+invalidation of one of its tags kills it.
+
+The cost of that rule is paid entirely by the request that rebuilds the
+configuration cache, and it is real: on the test site that one request goes
+from 307 to 428 round trips, against 632 for the stock backend. Requests that
+are not repopulating `cache_config` from cold are unaffected - 59 round trips
+against the stock backend's 95, and 14 against 17 fully warm.
 
 **Q: Can the render cache shortcut serve the wrong variation?**
 

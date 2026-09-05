@@ -416,7 +416,9 @@ class CommandBuffer implements CommandBufferInterface {
    *
    * What this does NOT cover, and cannot without a tombstone: a key another
    * process DELETED during the buffer window is absent, not newer, so the write
-   * recreates it. ::flush() documents that case.
+   * recreates it. That is survivable only because the entries with no way of
+   * recovering from it never reach this buffer - see ::flush() and
+   * \Drupal\redis_rtt\Cache\DeferredRedisBackend::setMultiple().
    */
   private const WRITE_IF_NOT_NEWER = <<<'LUA'
     local stored = redis.call('HGET', KEYS[1], 'created')
@@ -452,19 +454,25 @@ class CommandBuffer implements CommandBufferInterface {
    *
    * Writes are replayed with one guard: ::WRITE_IF_NOT_NEWER refuses to
    * overwrite an entry whose creation stamp is newer than the buffered one, so
-   * a write another process made during the buffer window survives. That is the
-   * case that used to be permanent, because entries in bins without cache tags
-   * - cache_config above all - never expire and nothing would correct them.
+   * a write another process made during the buffer window survives.
    *
    * A DEL issued by another process is still undone: an absent key is not a
-   * newer key, so the write recreates it with its pre-delete data until it
-   * expires or is written again. Distinguishing "deleted" from "never existed"
-   * needs a tombstone on every delete, which costs a key and a lifetime that
-   * has to outlive the longest buffer window. Catching that would need a tombstone written by the deleter
-   * and read by this flush: memory on every delete, a lifetime that has to
-   * outlive the longest buffer window, and it would still miss deletes from
-   * processes that do not run this module, so it is deliberately not done.
-   * ::deleteAll() is not exposed to this - it stamps a marker that the backend
+   * newer key, so the write recreates it with its pre-delete data. Closing that
+   * would take a tombstone written by every delete and read here - memory on
+   * every delete, a lifetime that has to outlive the longest buffer window, and
+   * it would still miss deletes from processes that do not run this module - so
+   * it is deliberately not done.
+   *
+   * What bounds the damage instead is that the entries which could never
+   * recover from it are never buffered in the first place:
+   * \Drupal\redis_rtt\Cache\DeferredRedisBackend::setMultiple() writes an entry
+   * with neither an expiry nor a cache tag synchronously, where the stock
+   * backend writes it. A resurrected entry therefore always has something that
+   * will eventually correct it - a TTL that expires it, or a tag whose next
+   * invalidation kills it. Without that rule, a config object deleted on one
+   * web node came back on all of them and stayed until a human rebuilt caches.
+   *
+   * ::deleteAll() is not exposed to this either: it stamps a marker the backend
    * compares against every entry's creation time when reading, so a resurrected
    * entry older than the marker is ignored. A single-key delete has no
    * equivalent marker.

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Drupal\Tests\redis_rtt\Unit;
 
 use Drupal\Component\Serialization\PhpSerialize;
+use Drupal\Core\Cache\Cache;
 use Drupal\Core\Cache\CacheTagsChecksumInterface;
 use Drupal\Core\Cache\ChainedFastBackend;
 use Drupal\Core\Site\Settings;
@@ -51,6 +52,20 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
    * The key the one cache entry in these tests lives under.
    */
   protected const ENTRY = 'p:config:system.site';
+
+  /**
+   * The cache tag every buffered entry in these tests carries.
+   *
+   * Not decoration. A permanent entry with no cache tag is written
+   * synchronously rather than buffered, because nothing could ever correct it
+   * if a concurrent delete were undone - so an entry without one would never
+   * reach the buffer these tests are about. Every bin core builds on
+   * ChainedFastBackend is permanent, which is why the tag is what makes the
+   * difference here.
+   *
+   * @see \Drupal\redis_rtt\Cache\DeferredRedisBackend::setMultiple()
+   */
+  protected const TAGS = ['config:system.site'];
 
   /**
    * The fake Redis both the backend and the buffer talk to.
@@ -125,7 +140,7 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
    * @covers ::set
    */
   public function testTheMarkerIsNotPublishedAheadOfTheData(): void {
-    $this->configBin()->set('system.site', 'new value');
+    $this->configBin()->set('system.site', 'new value', Cache::PERMANENT, self::TAGS);
 
     $this->assertArrayNotHasKey(self::MARKER, $this->client->data, 'A timestamp announcing a write nobody can read yet is worse than no timestamp at all.');
     $this->assertArrayNotHasKey(self::ENTRY, $this->client->data, 'The entry is buffered, so this only holds while the marker is buffered too.');
@@ -169,7 +184,7 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
    */
   public function testMarkerStillWaitsForDataQueuedBeforeTheDelete(): void {
     $bin = $this->configBin();
-    $bin->set('system.site', 'new value');
+    $bin->set('system.site', 'new value', Cache::PERMANENT, self::TAGS);
     $bin->delete('other.thing');
 
     $this->assertArrayNotHasKey(self::MARKER, $this->client->data, 'There is buffered data this marker would announce too early.');
@@ -187,7 +202,7 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
    */
   public function testDeletingOneBinLeavesAnotherBinsWaitingMarkerAlone(): void {
     // Config has data in the buffer, so its marker is waiting for it.
-    $this->configBin()->set('system.site', 'new value');
+    $this->configBin()->set('system.site', 'new value', Cache::PERMANENT, self::TAGS);
     // Discovery is cleared, so its marker has nothing to wait for.
     $this->discoveryBin()->deleteAll();
 
@@ -209,7 +224,7 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
    * @covers ::set
    */
   public function testTheMarkerLandsBehindTheDataAndOutlivesTheBufferWindow(): void {
-    $this->configBin()->set('system.site', 'new value');
+    $this->configBin()->set('system.site', 'new value', Cache::PERMANENT, self::TAGS);
 
     // The window another node reads in: it would take the old value now and
     // stamp its own copy with this moment.
@@ -242,7 +257,7 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
     $factory->method('getClient')->willReturn($this->client);
     $this->buffer = new CommandBuffer($factory);
 
-    $this->configBin()->set('system.site', 'new value');
+    $this->configBin()->set('system.site', 'new value', Cache::PERMANENT, self::TAGS);
 
     $this->assertArrayHasKey(self::ENTRY, $this->client->data);
     $this->assertArrayHasKey(self::MARKER, $this->client->data);
@@ -260,7 +275,7 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
    *
    * @covers ::setMultiple
    */
-  public function testAWriteAnnouncesItsBinWhenCoreSkipsTheMarker(): void {
+  public function testWritesAnnounceTheirBinWhenCoreSkipsTheMarker(): void {
     // Redis already holds a marker for this bin, which is what makes it a
     // chained-fast bin as far as the buffer can tell.
     $this->client->data[self::MARKER] = '1000';
@@ -275,7 +290,7 @@ class DeferredRedisBackendMarkerTest extends UnitTestCase {
       $this->buffer,
     );
     $consistent->setPrefix(self::PREFIX);
-    $consistent->setMultiple(['system.site' => ['data' => 'new value']]);
+    $consistent->setMultiple(['system.site' => ['data' => 'new value', 'tags' => self::TAGS]]);
 
     $this->buffer->flush();
 

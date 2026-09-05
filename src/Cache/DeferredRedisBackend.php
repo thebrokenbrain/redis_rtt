@@ -24,7 +24,10 @@ use Drupal\redis\ClientInterface;
  *    \Drupal\redis_rtt\Redis\CommandBuffer and flushed as a single pipeline
  *    at the end of the request, across all bins. Stock behaviour is one
  *    pipeline per ::setMultiple() call per bin, and most Drupal code writes
- *    one item at a time.
+ *    one item at a time. An entry with neither an expiry nor a cache tag is
+ *    excluded and written synchronously: buffering it would let a concurrent
+ *    delete be undone with nothing left to correct the result. See
+ *    ::setMultiple().
  *
  * 2. The "last delete all" marker is fetched inside the same pipeline as the
  *    first read of the bin instead of costing its own round trip. Stock
@@ -285,12 +288,34 @@ LUA;
       $this->checksumProvider->getCurrentChecksum(array_merge(...$tags));
     }
 
+    // Entries that cannot heal themselves, collected here and written
+    // synchronously below.
+    $unhealable = [];
+
     foreach ($items as $cid => $item) {
-      $this->buffer->queueWrite(
-        $this->getKey($cid),
-        $this->createEntryHash($cid, $item['data'], $item['expire'], $item['tags']),
-        $item['ttl'],
-      );
+      $hash = $this->createEntryHash($cid, $item['data'], $item['expire'], $item['tags']);
+
+      // An entry with neither an expiry nor a cache tag has no route back once
+      // it is wrong, and buffering is what can make it wrong: a key another
+      // process DELETEs during the buffer window is absent when the flush
+      // arrives, an absent key is not a newer key, and
+      // CommandBuffer::WRITE_IF_NOT_NEWER therefore recreates it with
+      // pre-delete data. In cache_config - permanent whenever the bin is in
+      // redis_permanent_bins, and written by CachedStorage without tags - that
+      // is deleted configuration served as live configuration on every web
+      // node, with nothing in Drupal able to correct it short of a manual cache
+      // rebuild. An entry that expires or carries a tag recovers on its own and
+      // stays buffered; this one is written where the stock backend writes it.
+      if ($item['ttl'] === NULL && $hash['tags'] === '') {
+        $unhealable[$cid] = $item;
+        continue;
+      }
+
+      $this->buffer->queueWrite($this->getKey($cid), $hash, $item['ttl']);
+    }
+
+    if ($unhealable) {
+      parent::setMultiple($unhealable);
     }
   }
 
