@@ -375,7 +375,7 @@ class PreloadingRedisCacheTagsChecksumTest extends UnitTestCase {
    *
    * @covers ::invalidateTags
    */
-  public function testInvalidatingATagDropsItsSpeculativeCount(): void {
+  public function testInvalidatingTagsDropsTheirSpeculativeCount(): void {
     new Settings([
       'redis_rtt_tag_warmset_min_hits' => 2,
       // Long enough that only the invalidation can drop the count.

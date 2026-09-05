@@ -346,7 +346,7 @@ class CommandBufferTest extends UnitTestCase {
    *
    * @covers ::flush
    */
-  public function testABufferedWriteDoesNotUndoANewerOne(): void {
+  public function testBufferedWritesDoNotUndoNewerOnes(): void {
     $buffer = $this->buffer();
     $key = 'p:config:system.site';
 
@@ -368,7 +368,7 @@ class CommandBufferTest extends UnitTestCase {
    *
    * @covers ::flush
    */
-  public function testABufferedWriteStillLands(): void {
+  public function testBufferedWritesStillLand(): void {
     $buffer = $this->buffer();
     $key = 'p:config:system.site';
 
