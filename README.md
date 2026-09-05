@@ -187,7 +187,11 @@ $settings['bootstrap_container_definition'] = [
 | `redis_rtt_tag_warmset_ttl` | `1.0` | Seconds a preloaded checksum may answer for its tag. |
 | `redis_rtt_report` | `FALSE` | Emit the `X-Redis-RTT` measurement header. |
 | `redis_rtt_report_top_commands` | `FALSE` | Add `X-Redis-RTT-Commands` with the per-command breakdown. |
-| `redis_rtt_log_errors` | `FALSE` | Warn through the PHP log when a Redis write fails, instead of swallowing it. Floods the log if Redis is down. |
+
+This module swallows nothing. A Redis write that fails - a failover, a replica
+that has gone read-only, a full instance - raises the same `RedisException` from
+the same place as the stock backend, and the request fails with it. There is no
+setting to change that, because there is no difference from stock to change.
 
 The connection accepts these on top of the redis module's own: `tls`, `timeout`,
 `read_timeout`, `retry_interval`, `persistent_id`, `user`, `verify_peer`.
