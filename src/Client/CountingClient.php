@@ -28,6 +28,10 @@ class CountingClient implements ClientInterface {
 
   /**
    * Number of Redis commands issued, pipelined or not.
+   *
+   * Not counting exec(), which batches nothing of its own: with ::pipeline()
+   * the commands are held locally and exec() only hands them over, so it is a
+   * wait rather than a command. ::$roundTrips counts it.
    */
   public static int $commands = 0;
 
@@ -69,8 +73,15 @@ class CountingClient implements ClientInterface {
       return $this->inner->__call($name, $arguments);
     }
 
-    static::$commands++;
-    static::$byCommand[$lower] = (static::$byCommand[$lower] ?? 0) + 1;
+    // exec() is not a Redis command here: ::pipeline() batches locally and
+    // exec() is the PHP call that hands the batch over, so counting it would
+    // report one command more than actually went to Redis - on a request with
+    // thirty pipelines, thirty. It is still a network wait, and it is counted
+    // as one below.
+    if ($lower !== 'exec') {
+      static::$commands++;
+      static::$byCommand[$lower] = (static::$byCommand[$lower] ?? 0) + 1;
+    }
 
     if ($this->inPipeline && $lower !== 'exec') {
       // Queued locally, no network wait yet.
