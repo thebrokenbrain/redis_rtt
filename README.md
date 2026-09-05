@@ -181,7 +181,7 @@ $settings['bootstrap_container_definition'] = [
 |---|---|---|
 | `redis_rtt_defer_writes` | `TRUE` | Buffer cache writes into one pipeline per request. |
 | `redis_rtt_max_pending_writes` | `512` | Force an intermediate flush at this many pending keys. |
-| `redis_rtt_unbuffered_bins` | `['container']` | Bins always written synchronously. |
+| `redis_rtt_unbuffered_bins` | `['container', 'entity', 'default']` | Bins always written synchronously. Replaces the default, so name the three above too if you add to it. |
 | `redis_rtt_redirect_shortcut` | `TRUE` | Skip the render cache redirect hop on a hit. |
 | `redis_rtt_redirect_shortcut_ttl` | `86400` | Lifetime of a learned mapping, in seconds. |
 | `redis_rtt_chain_memo_limit` | `1000` | Maximum render cache chains memoised in one request. |
@@ -327,13 +327,33 @@ protects against overwriting a fresher entry cannot see the difference between
 every delete, which costs memory on a path that currently costs nothing and
 would still miss deletes from processes that do not run this module.
 
-What makes that survivable is that the entries with no way of recovering from
-it are never buffered. An entry with neither an expiry nor a cache tag - a
-configuration object, above all, since `cache_config` is permanent by default
+Two things bound the damage. An entry with neither an expiry nor a cache tag -
+a configuration object, above all, since `cache_config` is permanent by default
 and `CachedStorage` writes it untagged - would stay wrong until somebody
 rebuilt caches by hand, so those are written synchronously, exactly where the
-stock backend writes them. Everything else is bounded: it expires, or the next
-invalidation of one of its tags kills it.
+stock backend writes them. And three bins never buffer at all
+(`redis_rtt_unbuffered_bins`): `container`, because a later request has to read
+the compiled service container back, and `entity` and `default`, because a
+resurrected entry there is not bounded by anything.
+
+`cache.entity` is the reason to take this seriously. Core deletes an entity's
+cache entry on every save rather than invalidating it, and tags it only with
+`<type>_values` and `entity_field_info`, which no content save invalidates - so
+a page view whose buffered write straddles a save brings the pre-save entity
+back with a one-year TTL and no tag that will ever kill it. The node edit form
+is built from the entity, so the next save from that form writes those stale
+values into the database and destroys the editor's change. `cache.default` is
+the same shape: `ExtensionList::reset()` deletes `core.extension.list.module`
+and its siblings, which carry no tag at all.
+
+**That list is what is known to be dangerous, not a proof that the rest is
+safe.** Any process deleting a single key from a buffered bin can have that
+delete undone, including a contributed module calling
+`\Drupal::cache('data')->delete()`. What makes the remaining bins tolerable is
+that their entries expire or carry tags that something does invalidate, so a
+resurrected entry is corrected rather than permanent. If you have code that
+deletes individual cache keys and depends on them staying deleted, add that bin
+to `redis_rtt_unbuffered_bins`.
 
 The cost of that rule is paid entirely by the request that rebuilds the
 configuration cache, and it is real: on the test site that one request goes

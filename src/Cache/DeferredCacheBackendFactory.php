@@ -47,12 +47,30 @@ class DeferredCacheBackendFactory implements CacheFactoryInterface {
     protected CommandBufferInterface $buffer,
     ?Settings $settings = NULL,
   ) {
-    // The container bin holds the compiled service container. It is written
-    // once per deployment by whichever request loses the rebuild race, and a
-    // later request must be able to read it back, so it is never buffered.
+    // Three bins are excluded by default, for two different reasons.
+    //
+    // 'container' holds the compiled service container. It is written once per
+    // deployment by whichever request loses the rebuild race, and a later
+    // request must be able to read it back, so it is never buffered.
+    //
+    // 'entity' and 'default' are excluded because a buffered write outliving
+    // another process' delete does real damage there, and nothing corrects it.
+    // Core removes an entity's cache entry with an explicit delete on every
+    // save (ContentEntityStorageBase::doPostSave() -> resetCache()), and tags
+    // it only with <type>_values and entity_field_info, which no content save
+    // invalidates - so a page view whose buffered write straddles a save
+    // recreates the pre-save entity, and it stays. Because the node edit form
+    // is built from the entity, the next save from that form then writes the
+    // stale values back into the database. 'default' is the same shape:
+    // ExtensionList::reset() deletes core.extension.list.module and its
+    // siblings, which carry no tag at all.
+    //
+    // This is a list of what is known to be dangerous, not a proof that the
+    // rest is safe. Any process deleting a single key from a buffered bin can
+    // have that delete undone; see CommandBuffer::flush().
     $this->unbufferedBins = (array) ($settings
-      ? $settings->get('redis_rtt_unbuffered_bins', ['container'])
-      : Settings::get('redis_rtt_unbuffered_bins', ['container']));
+      ? $settings->get('redis_rtt_unbuffered_bins', ['container', 'entity', 'default'])
+      : Settings::get('redis_rtt_unbuffered_bins', ['container', 'entity', 'default']));
   }
 
   /**
