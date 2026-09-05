@@ -7,6 +7,7 @@
 
 declare(strict_types=1);
 
+use Drupal\Core\Cache\Cache;
 use Drupal\Core\Site\Settings;
 use Drupal\redis\ClientFactory as RedisClientFactory;
 
@@ -33,16 +34,51 @@ function redis_rtt_requirements(string $phase): array {
   }
 
   // --- The cache backend --------------------------------------------------
-  $backend = Settings::get('cache')['default'] ?? NULL;
-  $backend_active = $backend === 'cache.backend.redis_rtt';
+  // Asked of the bins themselves rather than of $settings['cache']['default'],
+  // because a site may assign this backend per bin - the heavy ones only, which
+  // is a perfectly ordinary thing to do - and reading the default key alone
+  // would report a deliberate configuration as "not in use".
+  $deferred = [];
+  try {
+    foreach (Cache::getBins() as $bin => $bin_backend) {
+      if (is_a($bin_backend, 'Drupal\redis_rtt\Cache\DeferredRedisBackend')) {
+        $deferred[] = $bin;
+      }
+    }
+  }
+  catch (\Throwable $e) {
+    // Listing the bins means instantiating every cache backend, and this hook
+    // also runs where that cannot be done - mid-install, mid-rebuild, or with a
+    // container that has not been given the bin list. Fall back to the setting
+    // rather than taking the status report down with it.
+    $deferred = (Settings::get('cache')['default'] ?? NULL) === 'cache.backend.redis_rtt'
+      ? ['default']
+      : [];
+  }
+  sort($deferred);
+  $backend_active = (bool) $deferred;
+  $default = Settings::get('cache')['default'] ?? NULL;
+  $everywhere = $default === 'cache.backend.redis_rtt';
+
+  if ($everywhere) {
+    $value = t('Active');
+  }
+  elseif ($backend_active) {
+    $value = t('Active on @count bins (@bins)', [
+      '@count' => count($deferred),
+      '@bins' => implode(', ', $deferred),
+    ]);
+  }
+  else {
+    $value = t('Not in use (current: @backend)', ['@backend' => $default ?? t('database')]);
+  }
+
   $requirements['redis_rtt_backend'] = [
     'title' => t('Redis RTT: cache backend'),
-    'value' => $backend_active
-      ? t('Active')
-      : t('Not in use (current: @backend)', ['@backend' => $backend ?? t('database')]),
+    'value' => $value,
     'severity' => $backend_active ? REQUIREMENT_OK : REQUIREMENT_WARNING,
     'description' => $backend_active ? NULL : t(
-      'The deferred cache backend is where most of the saving comes from. Set <code>$settings["cache"]["default"] = "cache.backend.redis_rtt";</code> in settings.php.'
+      'The deferred cache backend is where most of the saving comes from. Set <code>$settings["cache"]["default"] = "cache.backend.redis_rtt";</code> in settings.php, or assign it to individual bins through <code>$settings["cache"]["bins"]</code>.'
     ),
   ];
 
