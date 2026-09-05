@@ -169,8 +169,10 @@ $settings['bootstrap_container_definition'] = [
 | `redis_rtt_unbuffered_bins` | `['container']` | Bins always written synchronously. |
 | `redis_rtt_redirect_shortcut` | `TRUE` | Skip the render cache redirect hop on a hit. |
 | `redis_rtt_redirect_shortcut_ttl` | `86400` | Lifetime of a learned mapping, in seconds. |
+| `redis_rtt_chain_memo_limit` | `1000` | Maximum render cache chains memoised in one request. |
 | `redis_rtt_tag_warmset_limit` | `400` | Maximum cache tags preloaded in one `MGET`. |
 | `redis_rtt_tag_warmset_min_hits` | `3` | Requests a tag must appear in before it is preloaded. |
+| `redis_rtt_tag_warmset_ttl` | `1.0` | Seconds a preloaded checksum may answer for its tag. |
 | `redis_rtt_report` | `FALSE` | Emit the `X-Redis-RTT` measurement header. |
 | `redis_rtt_report_top_commands` | `FALSE` | Add `X-Redis-RTT-Commands` with the per-command breakdown. |
 | `redis_rtt_log_errors` | `FALSE` | Warn through the PHP log when a buffered flush fails, instead of swallowing it. Floods the log if Redis is down. |
