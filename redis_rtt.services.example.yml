@@ -49,9 +49,13 @@ services:
   # 3. Render / Dynamic Page Cache / access policy lookups that skip the cache
   #    redirect hop on a hit.
   #
-  # This is the big one for authenticated traffic. Set
-  # $settings['redis_rtt_redirect_shortcut'] = FALSE to disable at runtime without
-  # editing this file.
+  # How much this is worth depends entirely on how deep the redirect chains are,
+  # which depends on how many cache contexts the site's elements vary by. On a
+  # site with 100 heavy nodes and six users it was measured at 0 round trips out
+  # of 13 on a warm node view and 4 out of 37 on a node edit form - the batched
+  # tag checksums are what carry that site. Measure yours with
+  # $settings['redis_rtt_redirect_shortcut'] = FALSE, which disables it at
+  # runtime without editing this file.
   # ---------------------------------------------------------------------------
   variation_cache_factory:
     class: Drupal\redis_rtt\Cache\RedirectShortcutVariationCacheFactory
