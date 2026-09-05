@@ -7,7 +7,6 @@ namespace Drupal\redis_rtt\StackMiddleware;
 use Drupal\Core\Database\Database;
 use Drupal\Core\Site\Settings;
 use Drupal\redis_rtt\Client\CountingClient;
-use Drupal\redis_rtt\Redis\CommandBufferInterface;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\HttpKernelInterface;
@@ -22,14 +21,7 @@ use Symfony\Component\HttpKernel\HttpKernelInterface;
  *
  * Emits, when enabled:
  *   X-Redis-RTT: redis-trips=41; redis-cmds=180; redis-ms=27.4; db-queries=23;
- *                db-ms=14.1; buffer-pipelines=0; buffer-pending=31;
- *                buffer-deduped=12
- *
- * Note buffer-pipelines: the header is built here, on the way out of the
- * kernel, and the buffered writes are sent from a shutdown function after
- * that. A normal request therefore reports zero pipelines and a non-empty
- * buffer-pending; anything above zero means an intermediate flush was forced
- * by redis_rtt_max_pending_writes, on the critical path.
+ *                db-ms=14.1
  *
  * A middleware rather than a response subscriber, and deliberately so. As a
  * subscriber this ran inside the page cache, which meant the header was stored
@@ -59,7 +51,6 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
 
   public function __construct(
     protected HttpKernelInterface $httpKernel,
-    protected CommandBufferInterface $buffer,
   ) {}
 
   /**
@@ -110,11 +101,6 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
     catch (\Exception) {
       // Logging was never started, or the connection is gone.
     }
-
-    $stats = $this->buffer->getStats();
-    $parts[] = 'buffer-pipelines=' . $stats['pipelines'];
-    $parts[] = 'buffer-pending=' . $stats['pending'];
-    $parts[] = 'buffer-deduped=' . $stats['deduped'];
 
     return $parts;
   }

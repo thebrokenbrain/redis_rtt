@@ -56,16 +56,3 @@ services:
   variation_cache_factory:
     class: Drupal\redis_rtt\Cache\RedirectShortcutVariationCacheFactory
     arguments: ['@request_stack', '@cache_factory', '@cache_contexts_manager']
-
-  # ---------------------------------------------------------------------------
-  # 4. Coalesced "last write timestamp" markers for the chained-fast bins
-  #    (bootstrap, config, discovery).
-  #
-  # Only worth enabling once the rest is in place; it matters most for cache
-  # rebuilds, cron and config imports rather than steady-state page serving.
-  # ---------------------------------------------------------------------------
-  # cache.backend.chainedfast:
-  #   class: Drupal\redis_rtt\Cache\CoalescingChainedFastBackendFactory
-  #   arguments: ['@settings']
-  #   calls:
-  #     - [setContainer, ['@service_container']]

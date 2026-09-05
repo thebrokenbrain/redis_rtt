@@ -38,11 +38,11 @@ function redis_rtt_requirements(string $phase): array {
   // because a site may assign this backend per bin - the heavy ones only, which
   // is a perfectly ordinary thing to do - and reading the default key alone
   // would report a deliberate configuration as "not in use".
-  $deferred = [];
+  $batched = [];
   try {
     foreach (Cache::getBins() as $bin => $bin_backend) {
-      if (is_a($bin_backend, 'Drupal\redis_rtt\Cache\DeferredRedisBackend')) {
-        $deferred[] = $bin;
+      if (is_a($bin_backend, 'Drupal\redis_rtt\Cache\BatchingRedisBackend')) {
+        $batched[] = $bin;
       }
     }
   }
@@ -51,12 +51,12 @@ function redis_rtt_requirements(string $phase): array {
     // also runs where that cannot be done - mid-install, mid-rebuild, or with a
     // container that has not been given the bin list. Fall back to the setting
     // rather than taking the status report down with it.
-    $deferred = (Settings::get('cache')['default'] ?? NULL) === 'cache.backend.redis_rtt'
+    $batched = (Settings::get('cache')['default'] ?? NULL) === 'cache.backend.redis_rtt'
       ? ['default']
       : [];
   }
-  sort($deferred);
-  $backend_active = (bool) $deferred;
+  sort($batched);
+  $backend_active = (bool) $batched;
   $default = Settings::get('cache')['default'] ?? NULL;
   $everywhere = $default === 'cache.backend.redis_rtt';
 
@@ -65,8 +65,8 @@ function redis_rtt_requirements(string $phase): array {
   }
   elseif ($backend_active) {
     $value = t('Active on @count bins (@bins)', [
-      '@count' => count($deferred),
-      '@bins' => implode(', ', $deferred),
+      '@count' => count($batched),
+      '@bins' => implode(', ', $batched),
     ]);
   }
   else {
@@ -78,7 +78,7 @@ function redis_rtt_requirements(string $phase): array {
     'value' => $value,
     'severity' => $backend_active ? REQUIREMENT_OK : REQUIREMENT_WARNING,
     'description' => $backend_active ? NULL : t(
-      'The deferred cache backend is where most of the saving comes from. Set <code>$settings["cache"]["default"] = "cache.backend.redis_rtt";</code> in settings.php, or assign it to individual bins through <code>$settings["cache"]["bins"]</code>.'
+      'This module\'s cache backend is where most of the saving comes from. Set <code>$settings["cache"]["default"] = "cache.backend.redis_rtt";</code> in settings.php, or assign it to individual bins through <code>$settings["cache"]["bins"]</code>.'
     ),
   ];
 

@@ -227,7 +227,7 @@ class PreloadingRedisCacheTagsChecksumTest extends UnitTestCase {
     $provider->invalidateTags(['node:1']);
 
     // Still inside the transaction, a cache read hands the raw tags of every
-    // entry it returned to the preload hook, as DeferredRedisBackend does, and
+    // entry it returned to the preload hook, as the cache backend does, and
     // one of those entries is then validated.
     $provider->registerCacheTagsForPreload(['node:1', 'node:2']);
     $provider->isValid(0, ['node:2']);

@@ -179,9 +179,6 @@ $settings['bootstrap_container_definition'] = [
 
 | Setting | Default | Effect |
 |---|---|---|
-| `redis_rtt_defer_writes` | `TRUE` | Buffer cache writes into one pipeline per request. |
-| `redis_rtt_max_pending_writes` | `512` | Force an intermediate flush at this many pending keys. |
-| `redis_rtt_unbuffered_bins` | `['container', 'entity', 'default']` | Bins always written synchronously. Replaces the default, so name the three above too if you add to it. |
 | `redis_rtt_redirect_shortcut` | `TRUE` | Skip the render cache redirect hop on a hit. |
 | `redis_rtt_redirect_shortcut_ttl` | `86400` | Lifetime of a learned mapping, in seconds. |
 | `redis_rtt_chain_memo_limit` | `1000` | Maximum render cache chains memoised in one request. |
@@ -190,7 +187,7 @@ $settings['bootstrap_container_definition'] = [
 | `redis_rtt_tag_warmset_ttl` | `1.0` | Seconds a preloaded checksum may answer for its tag. |
 | `redis_rtt_report` | `FALSE` | Emit the `X-Redis-RTT` measurement header. |
 | `redis_rtt_report_top_commands` | `FALSE` | Add `X-Redis-RTT-Commands` with the per-command breakdown. |
-| `redis_rtt_log_errors` | `FALSE` | Warn through the PHP log when a buffered flush fails, instead of swallowing it. Floods the log if Redis is down. |
+| `redis_rtt_log_errors` | `FALSE` | Warn through the PHP log when a Redis write fails, instead of swallowing it. Floods the log if Redis is down. |
 
 The connection accepts these on top of the redis module's own: `tls`, `timeout`,
 `read_timeout`, `retry_interval`, `persistent_id`, `user`, `verify_peer`.
@@ -236,14 +233,12 @@ as the stock backend's, so nothing persists in an incompatible state.
 
 ## How it works
 
-Six independent changes, all aimed at the same thing:
+Five independent changes, all aimed at the same thing:
 
-- **Batched writes.** Cache writes of a request, across every bin, go out as one
-  pipeline at the end of the request - after `fastcgi_finish_request()`, so they
-  leave the critical path entirely. Repeated writes to a key are deduplicated,
-  and reads are answered from the buffer. Entries with neither an expiry nor a
-  cache tag are the exception and are written synchronously; see the FAQ on
-  buffering safety for why.
+- **One round trip per bin read.** The stock backend spends an extra `GET` per
+  bin per request fetching the "last delete all" marker the first time an entry
+  of that bin is expanded. It rides in the same pipeline as the read that needed
+  it instead.
 - **No redirect hop on render cache hits.** `VariationCache` reads a cache ID,
   gets a `CacheRedirect` naming the real cache contexts, then reads again, and
   each hop waits for the one before it. That chain is structural, so its shape
@@ -269,8 +264,9 @@ Six independent changes, all aimed at the same thing:
   timeout - which is how a brief failover becomes an outage.
 
 Nothing is cached across requests except facts that are structural and
-self-verifying. Cache tag invalidations are never deferred: they are the source
-of truth for consistency and always go out immediately.
+self-verifying. Every write, delete and invalidation reaches Redis exactly when
+the stock backend sends it: this module changes how many network waits that
+costs, never when the data lands.
 
 
 ## Measured results
@@ -311,55 +307,14 @@ bottleneck and this module has nothing to offer you.
 
 ## FAQ
 
-**Q: Is it safe to buffer cache writes? What if the process dies?**
+**Q: Does this module change when my cache writes reach Redis?**
 
-**A:** Buffered entries are cache data only, so an unsent write means the value
-is recomputed on the next request. Deletes, invalidations and cache tag
-invalidations are never buffered. Each entry's tag checksum is computed when
-`set()` is called rather than when the write is sent, so an invalidation that
-happens in between still wins.
-
-One case does not resolve that cleanly, and it is worth stating plainly. If
-*another* process deletes a key while this one is holding a buffered write for
-it, the flush recreates it: an absent key is not a newer key, so the guard that
-protects against overwriting a fresher entry cannot see the difference between
-"deleted" and "never existed". Distinguishing them needs a tombstone written by
-every delete, which costs memory on a path that currently costs nothing and
-would still miss deletes from processes that do not run this module.
-
-Two things bound the damage. An entry with neither an expiry nor a cache tag -
-a configuration object, above all, since `cache_config` is permanent by default
-and `CachedStorage` writes it untagged - would stay wrong until somebody
-rebuilt caches by hand, so those are written synchronously, exactly where the
-stock backend writes them. And three bins never buffer at all
-(`redis_rtt_unbuffered_bins`): `container`, because a later request has to read
-the compiled service container back, and `entity` and `default`, because a
-resurrected entry there is not bounded by anything.
-
-`cache.entity` is the reason to take this seriously. Core deletes an entity's
-cache entry on every save rather than invalidating it, and tags it only with
-`<type>_values` and `entity_field_info`, which no content save invalidates - so
-a page view whose buffered write straddles a save brings the pre-save entity
-back with a one-year TTL and no tag that will ever kill it. The node edit form
-is built from the entity, so the next save from that form writes those stale
-values into the database and destroys the editor's change. `cache.default` is
-the same shape: `ExtensionList::reset()` deletes `core.extension.list.module`
-and its siblings, which carry no tag at all.
-
-**That list is what is known to be dangerous, not a proof that the rest is
-safe.** Any process deleting a single key from a buffered bin can have that
-delete undone, including a contributed module calling
-`\Drupal::cache('data')->delete()`. What makes the remaining bins tolerable is
-that their entries expire or carry tags that something does invalidate, so a
-resurrected entry is corrected rather than permanent. If you have code that
-deletes individual cache keys and depends on them staying deleted, add that bin
-to `redis_rtt_unbuffered_bins`.
-
-The cost of that rule is paid entirely by the request that rebuilds the
-configuration cache, and it is real: on the test site that one request goes
-from 307 to 428 round trips, against 632 for the stock backend. Requests that
-are not repopulating `cache_config` from cold are unaffected - 59 round trips
-against the stock backend's 95, and 14 against 17 fully warm.
+**A:** No. Every `set()`, `delete()` and invalidation goes to Redis at the same
+point in the request as with the stock backend, and in the same order. What the
+module changes is how many network waits a request spends on *reads*, on cache
+tag checksums and on invalidations - not when data lands. An entry written on
+one web node is readable from another exactly as soon as it would have been
+without this module.
 
 **Q: Can the render cache shortcut serve the wrong variation?**
 

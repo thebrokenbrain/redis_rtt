@@ -77,7 +77,7 @@ class FastPhpRedisFactory extends PhpRedisFactory {
    */
   public function getClient(#[\SensitiveParameter] array $settings): ClientInterface {
     // A list of hosts means Sentinel, so which server to connect to has to be
-    // asked for first. Only the asking is deferred to the parent; the answer is
+    // asked for first. Only the asking goes to the parent; the answer is
     // an ordinary host and port, and connecting to it is this class' whole job.
     // Handing the connection itself back to the parent - which is what this did
     // - dropped every setting below on exactly the deployments that fail over
