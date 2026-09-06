@@ -8,6 +8,7 @@ use Drupal\Component\Serialization\SerializationInterface;
 use Drupal\Core\Cache\CacheFactoryInterface;
 use Drupal\Core\Cache\CacheTagsChecksumInterface;
 use Drupal\redis\ClientFactory;
+use Drupal\redis_rtt\Redis\WriteBatch;
 
 /**
  * Builds one \Drupal\redis_rtt\Cache\BatchingRedisBackend per bin.
@@ -31,10 +32,25 @@ class BatchingCacheBackendFactory implements CacheFactoryInterface {
    */
   protected array $bins = [];
 
+  /**
+   * Constructs the factory.
+   *
+   * @param \Drupal\redis\ClientFactory $clientFactory
+   *   The Redis client factory.
+   * @param \Drupal\Core\Cache\CacheTagsChecksumInterface $checksumProvider
+   *   The cache tags checksum provider.
+   * @param \Drupal\Component\Serialization\SerializationInterface $serializer
+   *   The serializer.
+   * @param \Drupal\redis_rtt\Redis\WriteBatch|null $batch
+   *   (optional) One batch shared by every bin, so that a single pipeline
+   *   carries whatever the request happens to be writing rather than one per
+   *   bin. NULL writes everything immediately.
+   */
   public function __construct(
     protected ClientFactory $clientFactory,
     protected CacheTagsChecksumInterface $checksumProvider,
     protected SerializationInterface $serializer,
+    protected ?WriteBatch $batch = NULL,
   ) {}
 
   /**
@@ -53,6 +69,7 @@ class BatchingCacheBackendFactory implements CacheFactoryInterface {
         $this->clientFactory->getClient(),
         $this->checksumProvider,
         $this->serializer,
+        $this->batch,
       );
     }
     return $this->bins[$bin];

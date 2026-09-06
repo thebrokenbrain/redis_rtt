@@ -14,6 +14,13 @@ use Drupal\redis\ClientInterface;
  * phpredis' pipeline semantics where queued commands return the client and
  * exec() returns the ordered replies.
  *
+ * It recognises those scripts, it does not run Lua. Where a script's behaviour
+ * is worth asserting on, the branch here reads the deciding line out of the
+ * script text, so that deleting that line from the real script fails the test
+ * rather than quietly passing against a stand-in that kept the behaviour. The
+ * scripts themselves are exercised against a real Redis in
+ * redis_rtt-auditoria/reproducciones/.
+ *
  * The counter that matters is $roundTrips: one per command issued outside a
  * pipeline, one per exec(). That is what a cross-AZ hop actually costs, and it
  * is what the tests assert on - asserting on the number of commands would miss
@@ -123,7 +130,8 @@ final class FakeRedisClient implements ClientInterface {
         return $this->data[$args[0]] ?? [];
 
       case 'hmset':
-        $this->data[$args[0]] = array_map('strval', $args[1]);
+        // HMSET sets the named fields and leaves the rest of the hash alone.
+        $this->data[$args[0]] = array_map('strval', $args[1]) + ($this->data[$args[0]] ?? []);
         return TRUE;
 
       case 'hget':
@@ -197,6 +205,28 @@ final class FakeRedisClient implements ClientInterface {
    *   The script's return value.
    */
   private function runScript(string $script, array $args): int {
+    // Batched cache write, guarded on the stored creation stamp.
+    if (str_contains($script, "'created'")) {
+      $key = (string) array_shift($args);
+      $created = (float) array_shift($args);
+      // The TTL is read off the arguments and discarded: nothing here depends
+      // on eviction.
+      array_shift($args);
+      // The guard is read out of the script rather than assumed, so that a test
+      // asserting on it fails if it is ever removed from the script itself.
+      $guarded = str_contains($script, 'tonumber(stored) > tonumber(ARGV[1])');
+      $stored = $this->data[$key]['created'] ?? NULL;
+      if ($guarded && $stored !== NULL && (float) $stored > $created) {
+        return 0;
+      }
+      $hash = [];
+      for ($i = 0; $i < count($args); $i += 2) {
+        $hash[(string) $args[$i]] = (string) $args[$i + 1];
+      }
+      $this->data[$key] = $hash + (is_array($this->data[$key] ?? NULL) ? $this->data[$key] : []);
+      return 1;
+    }
+
     // Cache entry invalidation.
     if (str_contains($script, "'valid'")) {
       $key = $args[0];

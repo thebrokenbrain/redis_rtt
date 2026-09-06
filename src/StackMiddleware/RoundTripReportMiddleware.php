@@ -7,6 +7,7 @@ namespace Drupal\redis_rtt\StackMiddleware;
 use Drupal\Core\Database\Database;
 use Drupal\Core\Site\Settings;
 use Drupal\redis_rtt\Client\CountingClient;
+use Drupal\redis_rtt\Redis\WriteBatch;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\HttpKernelInterface;
@@ -21,7 +22,7 @@ use Symfony\Component\HttpKernel\HttpKernelInterface;
  *
  * Emits, when enabled:
  *   X-Redis-RTT: redis-trips=41; redis-cmds=180; redis-ms=27.4; db-queries=23;
- *                db-ms=14.1
+ *                db-ms=14.1; batches=7; batched-writes=643
  *
  * A middleware rather than a response subscriber, and deliberately so. As a
  * subscriber this ran inside the page cache, which meant the header was stored
@@ -49,8 +50,20 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
    */
   protected const LOG_KEY = 'redis_rtt';
 
+  /**
+   * Constructs the middleware.
+   *
+   * @param \Symfony\Component\HttpKernel\HttpKernelInterface $httpKernel
+   *   The kernel to decorate.
+   * @param \Drupal\redis_rtt\Redis\WriteBatch|null $batch
+   *   (optional) The write batch, sent before the report is built. Batched
+   *   writes normally leave at the end of the request, after the response has
+   *   gone out; a report that stopped before them would under-count every round
+   *   trip they cost, which is exactly the number this header exists to state.
+   */
   public function __construct(
     protected HttpKernelInterface $httpKernel,
+    protected ?WriteBatch $batch = NULL,
   ) {}
 
   /**
@@ -70,6 +83,9 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
     }
 
     $response = $this->httpKernel->handle($request, $type, $catch);
+
+    // Send whatever is still queued, so the counts below include it.
+    $this->batch?->send();
 
     $response->headers->set('X-Redis-RTT', implode('; ', $this->report()));
 
@@ -100,6 +116,12 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
     }
     catch (\Exception) {
       // Logging was never started, or the connection is gone.
+    }
+
+    if ($this->batch) {
+      $stats = $this->batch->getStats();
+      $parts[] = 'batches=' . $stats['batches'];
+      $parts[] = 'batched-writes=' . $stats['writes'];
     }
 
     return $parts;
