@@ -54,6 +54,14 @@ use Drupal\redis\ClientInterface;
  * A contributed module that deletes a render key by hand is not covered.
  * Nothing stops it, and no measurement can rule it out - only bound it. A site
  * doing that should take its bin out of redis_rtt_batched_bins.
+ *
+ * Neither is a cache write issued from a destructor that runs after the last
+ * shutdown function. ::sendOnShutdown() re-arms itself, which covers anything
+ * written from another shutdown function, but PHP will not run a function
+ * registered from that late in teardown. Core writes nothing there - what it
+ * writes late (MenuActiveTrail, AliasManager, LibraryDiscoveryCollector) goes
+ * out through DestructableInterface::destruct() during kernel.terminate, well
+ * before shutdown, and is batched normally.
  */
 class WriteBatch {
 
@@ -379,7 +387,27 @@ LUA;
   }
 
   /**
-   * Registers the end-of-request send, once.
+   * Sends at the end of the request, and re-arms for anything written after.
+   *
+   * The re-arming is the point. A shutdown function that writes to cache runs
+   * *after* this one, and without a fresh registration its writes would sit in
+   * the queue until the process died: no exception, no log, and - worse - the
+   * previous version of the key still being served while the code that updated
+   * it had every reason to believe it had. Registering again from inside a
+   * shutdown function works: both PHP and Drupal's own dispatcher walk the list
+   * by index, so entries appended while it runs are picked up.
+   *
+   * ::send() and ::sendQuietly() deliberately do not touch the flag. A batch
+   * that goes out mid-request leaves the registration standing, because it has
+   * not run yet and will still catch everything written later in the request.
+   */
+  public function sendOnShutdown(): void {
+    $this->sendQuietly();
+    $this->shutdownRegistered = FALSE;
+  }
+
+  /**
+   * Registers the end-of-request send, unless one is already pending.
    */
   protected function registerShutdown(): void {
     if ($this->shutdownRegistered) {
@@ -387,10 +415,10 @@ LUA;
     }
     $this->shutdownRegistered = TRUE;
     if (function_exists('drupal_register_shutdown_function')) {
-      drupal_register_shutdown_function([$this, 'sendQuietly']);
+      drupal_register_shutdown_function([$this, 'sendOnShutdown']);
     }
     else {
-      register_shutdown_function([$this, 'sendQuietly']);
+      register_shutdown_function([$this, 'sendOnShutdown']);
     }
   }
 

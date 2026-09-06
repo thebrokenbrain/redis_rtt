@@ -467,9 +467,10 @@ write path exactly. If the symptom goes away, the bin involved is one the
 batching should not have taken: name the remaining bins in
 `redis_rtt_batched_bins` and please open an issue saying which one it was.
 
-**`batches` is high relative to `batched-writes` in the header.** Something is
-emptying the batch early - a `deleteAll()` on a batched bin, or a limit set far
-below 100. It costs round trips rather than correctness.
+**`batches` is high relative to `batched-writes` in the header.** The limit is
+set far below 100. It costs round trips rather than correctness. Note that
+`batches=1` for a handful of writes is the normal reading of a warm page, not a
+symptom.
 
 
 ## FAQ

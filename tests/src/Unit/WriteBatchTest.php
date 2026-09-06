@@ -16,6 +16,8 @@ use Drupal\redis\ClientFactory;
 use Drupal\redis_rtt\Cache\BatchingRedisBackend;
 use Drupal\redis_rtt\Redis\WriteBatch;
 
+require_once __DIR__ . '/write_batch_shutdown.php';
+
 /**
  * Checks that batching writes saves waits without losing or reviving entries.
  *
@@ -45,6 +47,7 @@ class WriteBatchTest extends UnitTestCase {
   protected function setUp(): void {
     parent::setUp();
     $this->client = new FakeRedisClient();
+    $GLOBALS['redis_rtt_test_shutdown'] = [];
 
     $time = $this->createMock(TimeInterface::class);
     $time->method('getRequestTime')->willReturn(1000000);
@@ -509,6 +512,109 @@ class WriteBatchTest extends UnitTestCase {
 
     $this->assertSame(1, $this->client->roundTrips, 'Three bins, one wait.');
     $this->assertCount(3, $this->client->data);
+  }
+
+
+  /**
+   * Runs the shutdown callbacks the batch registered, as the process would.
+   *
+   * Walks by index rather than iterating a copy, because a callback may
+   * register another one while it runs - which is the whole behaviour under
+   * test - and PHP's own dispatcher does the same.
+   *
+   * @return int
+   *   How many callbacks ran.
+   */
+  protected function runShutdown(): int {
+    $ran = 0;
+    for ($i = 0; isset($GLOBALS['redis_rtt_test_shutdown'][$i]); $i++) {
+      $GLOBALS['redis_rtt_test_shutdown'][$i]();
+      $ran++;
+    }
+
+    return $ran;
+  }
+
+  /**
+   * Whatever is queued when the request ends is sent.
+   *
+   * Deleting the registration entirely used to leave the whole suite green
+   * while a live site lost every batched write a page made.
+   *
+   * @covers ::sendOnShutdown
+   */
+  public function testTheEndOfTheRequestSendsWhatIsQueued(): void {
+    $batch = $this->batch();
+    $backend = $this->backend('render', $batch);
+
+    $backend->set('pendiente', 'value');
+    $this->assertArrayNotHasKey('p:render:pendiente', $this->client->data, 'It should still be queued.');
+
+    $this->assertSame(1, $this->runShutdown(), 'One callback should have been registered.');
+
+    $this->assertArrayHasKey('p:render:pendiente', $this->client->data, 'The end of the request must flush the queue.');
+  }
+
+  /**
+   * A write made after the request has ended is still sent.
+   *
+   * A shutdown function that writes to cache runs after the batch's own, so the
+   * batch has to register again. Without that its writes die with the process:
+   * no exception, no log, and the previous value still being served while the
+   * code that updated it believed it had.
+   *
+   * @covers ::sendOnShutdown
+   */
+  public function testWritesMadeDuringShutdownAreStillSent(): void {
+    $batch = $this->batch();
+    $backend = $this->backend('render', $batch);
+    $backend->set('temprano', 'value');
+
+    // A shutdown function that writes, registered after the batch's own.
+    $GLOBALS['redis_rtt_test_shutdown'][] = function () use ($backend) {
+      $backend->set('tardio', 'value');
+    };
+
+    $this->runShutdown();
+
+    $this->assertArrayHasKey('p:render:temprano', $this->client->data);
+    $this->assertArrayHasKey('p:render:tardio', $this->client->data, 'A write made during shutdown must not die with the process.');
+  }
+
+  /**
+   * A batch sent mid-request does not drop the pending registration.
+   *
+   * Re-arming there would register a second callback for every full batch, and
+   * the first one has not run yet: it still catches everything written later.
+   *
+   * @covers ::sendOnShutdown
+   */
+  public function testAFullBatchDoesNotRegisterASecondCallback(): void {
+    $batch = $this->batch(['redis_rtt_max_batched_writes' => 2]);
+    $backend = $this->backend('render', $batch);
+
+    foreach (range(1, 6) as $i) {
+      $backend->set("cid-$i", $i);
+    }
+
+    $this->assertCount(1, $GLOBALS['redis_rtt_test_shutdown'], 'Three full batches, still one registration.');
+  }
+
+  /**
+   * A batched write carries the lifetime the entry was given.
+   *
+   * @covers ::add
+   */
+  public function testBatchedWritesCarryTheirLifetime(): void {
+    $batch = $this->batch();
+    $backend = $this->backend('render', $batch);
+
+    $backend->set('caduca', 'value', 1000000 + 600);
+    $backend->set('permanente', 'value');
+    $batch->send();
+
+    $this->assertSame(4200, $this->client->ttls['p:render:caduca'], 'An entry with an expiry keeps it: 600 s plus the default offset.');
+    $this->assertSame(31536000, $this->client->ttls['p:render:permanente'], 'A permanent entry gets the backend default, not "no expiry".');
   }
 
   /**
