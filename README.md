@@ -12,10 +12,13 @@ another: each answer decides what to ask next.
 
 This module makes the same work wait for the network far less often. Reads that
 Drupal issues one at a time are gathered into single pipelines; the writes of
-four bins travel in batches instead of one round trip each. It sends slightly
-*more* Redis commands than stock Drupal and waits for a third to a half as many
-of them. On a heavy authenticated page built from cold, measured below: 815
-network waits become 436.
+four bins travel in batches instead of one round trip each.
+
+What that changes is the waiting, not the work. Across the seven scenarios
+measured below the command count moves by between 0.5% and 23%, while the number
+of network waits halves. The clearest of them is a warm edit form: 0.5% fewer
+commands, 47% fewer waits. On a heavy authenticated page built from cold, 815
+waits become 436.
 
 For a full description of the module, visit the
 [project page](https://www.drupal.org/project/redis_rtt).
@@ -448,6 +451,13 @@ the round trip counts were identical across all three.
 | view a node, warm | 24 | 16 | **14** |
 | edit form, warm | 61 | 32 | **32** |
 | content listing, warm | 166 | 86 | **86** |
+
+Commands, over the same seven scenarios, move very little: 10,437 to 10,065 on
+the cold node view, 3,166 to 3,149 on the warm edit form, 221 to 202 on the warm
+listing. Always slightly fewer, never more - most of what this module does
+*replaces* commands rather than adding them, an `EVAL` standing in for
+`HMSET` + `EXPIRE`, an `MGET` for thirty `GET`s. That is the point of the two
+columns being different numbers: the work is the same, the waiting is not.
 
 Batching accounts for the whole difference between the last two columns, and
 only on cold pages: a warm page writes nothing, so there is nothing to batch.
