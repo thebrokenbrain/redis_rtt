@@ -529,24 +529,27 @@ of 241. The other 3,100 are `cache.entity`, which Drupal already writes in bulk:
 
 ### Wall time
 
-Same site, same latency, instrumentation off:
+Same site, same latency, instrumentation off. All three columns of a row are
+measured in one sitting, which matters more than it sounds: the same code on the
+same machine gave 6300 ms one night and 7089 ms the next, so a table assembled
+from separate sittings compares the weather rather than the code.
 
 | scenario, authenticated | stock | module, no batching | module |
 |---|---|---|---|
-| content listing, cold | 1319 ms | 1164 ms | **922 ms** |
-| view a node, cold | 6385 ms | 6300 ms | **5996 ms** |
-| edit form, cold | 2377 ms | 2323 ms | **2268 ms** |
+| content listing, cold | 1429 ms | 1213 ms | **994 ms** (-18%) |
+| view a node, cold | 7263 ms | 7089 ms | **6794 ms** (-4%) |
+| edit form, cold | 2999 ms | 2951 ms | **2876 ms** (-3%) |
 | warm pages | — | — | no measurable change |
 
-The saving in time tracks the saving in waits, which is the point: 254 fewer
-waits at 1 ms each is about 300 ms off the cold node view.
+The saving in time tracks the saving in waits, which is the point: 245 fewer
+waits at 1 ms each is about 295 ms off the cold node view.
 
 It is also worth reading the first row against the second. The listing gains
-21%; the node view gains 5% for a larger absolute saving, because that page
-spends six seconds and most of them are PHP rendering 550 entities. This module
-can only give back time that was spent waiting for Redis. Where that is not
-where the time goes, it has little to offer, and no amount of round trip
-reduction changes that.
+18%; the node view gains 4% for a larger absolute saving, because that page
+spends seven seconds and most of them are PHP rendering 550 entities. This module
+can only give back time that was spent waiting for Redis. Where that is not where
+the time goes, it has little to offer, and no amount of round trip reduction
+changes that.
 
 **With no injected latency at all, all three configurations are within noise of
 each other.** The saving *is* the cost of the latency and disappears with it. If
