@@ -368,6 +368,44 @@ render key by hand is not covered, and no measurement can rule that out - only
 bound it. A site doing that should take the bin out of `redis_rtt_batched_bins`,
 or set `redis_rtt_batch_writes` to `FALSE`.
 
+### Does your site do this?
+
+The batching is safe for the four bins above because nothing deletes or
+invalidates their keys one at a time. Core does not: `MONITOR` over four
+independent sweeps - 131,000 commands of node, term, user, alias, menu and
+config saves, tag invalidation, cron, config import and export, and installing
+and uninstalling modules - recorded not one per-key delete against a batched
+bin. The only caller in core is the Views options UI
+(`GroupwiseMax::submitOptionsForm()`).
+
+A contributed module can still do it, and the module has no way to notice. If
+any code on your site does one of these against `render`, `data`, `menu` or
+`dynamic_page_cache`, that bin must come off the list:
+
+```php
+\Drupal::cache('render')->delete($cid);
+\Drupal::cache('data')->deleteMultiple($cids);
+\Drupal::cache('menu')->invalidate($cid);
+```
+
+Deleting the whole bin, invalidating by cache tag, and writing are all fine -
+those are handled. It is the per-key `delete()` and `invalidate()` from *another*
+request that can be undone, and only during the window in which the write is
+still queued.
+
+To check a site, the cheapest test is to grep for it:
+
+```bash
+grep -rn "cache('\(render\|data\|menu\|dynamic_page_cache\)')" web/modules/contrib \
+  | grep -E "->(delete|deleteMultiple|invalidate|invalidateMultiple)\("
+```
+
+Then take any bin that turns up out of the list:
+
+```php
+$settings['redis_rtt_batched_bins'] = ['render', 'menu', 'dynamic_page_cache'];
+```
+
 
 ## Measured results
 
