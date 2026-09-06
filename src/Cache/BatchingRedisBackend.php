@@ -315,16 +315,24 @@ LUA;
 
     // One round trip for the whole set, instead of a sequential HGET + HSET per
     // cache ID.
-    $this->client->pipeline();
-    foreach ($cids as $cid) {
-      $key = $this->getKey($cid);
-      // A queued entry is invalidated in place as well as in Redis: in place so
-      // that this request reads it as invalid, and in Redis because an earlier
-      // version of the same key may already be stored there.
-      $this->batch?->invalidatePending($key);
-      $this->client->eval(static::INVALIDATE_LUA, [$key], 1);
+    try {
+      $this->client->pipeline();
+      foreach ($cids as $cid) {
+        $key = $this->getKey($cid);
+        // A queued entry is invalidated in place as well as in Redis: in place
+        // so that this request reads it as invalid, and in Redis because an
+        // earlier version of the same key may already be stored there.
+        $this->batch?->invalidatePending($key);
+        $this->client->eval(static::INVALIDATE_LUA, [$key], 1);
+      }
+      $this->client->exec();
     }
-    $this->client->exec();
+    catch (\Exception $e) {
+      // A pipeline of scripts that times out mid-flight leaves the connection
+      // reading the previous command's replies. See WriteBatch::discard().
+      WriteBatch::discard($this->client);
+      throw $e;
+    }
   }
 
 }

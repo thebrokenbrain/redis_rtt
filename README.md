@@ -18,7 +18,7 @@ What that changes is the waiting, not the work. Across the seven scenarios
 measured below the command count moves by between 0.5% and 23%, while the number
 of network waits halves. The clearest of them is a warm edit form: 0.5% fewer
 commands, 47% fewer waits. On a heavy authenticated page built from cold, 815
-waits become 436.
+waits become 445.
 
 For a full description of the module, visit the
 [project page](https://www.drupal.org/project/redis_rtt).
@@ -201,7 +201,7 @@ $settings['bootstrap_container_definition'] = [
 | `redis_rtt_report` | `FALSE` | Emit the `X-Redis-RTT` measurement header. |
 | `redis_rtt_report_top_commands` | `FALSE` | Add `X-Redis-RTT-Commands` with the per-command breakdown. |
 
-`redis_rtt_batched_bins` defaults to `['render', 'data', 'menu',
+`redis_rtt_batched_bins` defaults to `['render', 'menu',
 'dynamic_page_cache']`. It is a list of bins that have been checked against the
 three conditions in **Batched writes** below, not a list of bins that have been
 ruled out: every other bin, including any a contributed module declares, writes
@@ -296,7 +296,9 @@ Seven independent changes, all aimed at the same thing:
   `MGET`. Checksums are still read fresh every request; only the batching
   changes.
 - **One round trip per lock.** `release()` and lock renewal are
-  compare-and-swap, done upstream with `WATCH`/`GET`/`MULTI`/`EXEC`. A Lua
+  compare-and-swap, done upstream with `WATCH`/`GET`/`MULTI`/`EXEC` - five
+  round trips, because phpredis sends each command inside a MULTI block and
+  reads back `+QUEUED`, rather than holding them the way a pipeline does. A Lua
   script does the same atomically in one round trip, and without leaving a
   dangling `WATCH` on a persistent connection if the process dies.
 - **One round trip per invalidation batch.** `invalidateMultiple()` costs a
@@ -343,6 +345,10 @@ takes all three of:
    title.
 3. **They are not chained-fast bins**, so there is no "last write" marker that
    has to reach Redis behind the data it announces.
+4. **Nothing reads one of their keys to decide whether to correct it.** Not the
+   same as the first condition: the danger there is a delete the flush undoes,
+   here it is a *read* that misses a queued write and draws a conclusion from
+   its absence.
 
 `cache.entity`, `cache.default` and the chained-fast bins each fail one of
 those and write immediately. They lose almost nothing by it: `cache.entity`
@@ -355,6 +361,20 @@ would batch `cache.page`, `cache.toolbar` and whatever bin a contributed module
 declares tomorrow, none of which anyone has checked. Handing untested bins the
 benefit of the doubt is the shape of reasoning that produced the data loss, so
 the setting names what may be batched rather than what may not.
+
+`cache.data` was on the list until a review found what the fourth condition is
+for. The [redirect](https://www.drupal.org/project/redirect) module keeps
+`redirect_prefix_list:<prefix>` there - permanent, untagged, and holding the
+answer to "does any redirect start with this prefix". `Redirect::postSave()`
+corrects that entry only if it *reads* it and finds `FALSE`; a queued write is
+invisible to that read, so the correction never happens and the queued `FALSE`
+lands after it. A redirect the editor can see in the admin listing then answers
+404, for a year, until any cache flush.
+
+The lesson is about the bin rather than that module. `cache.data` is a
+general-purpose scratch bin that any module writes to with whatever discipline it
+likes; `render`, `menu` and `dynamic_page_cache` are written by core to one. A
+bin nobody owns cannot be checked once and then trusted.
 
 Three further rules, each of them the memory of a bug:
 
@@ -381,32 +401,67 @@ and uninstalling modules - recorded not one per-key delete against a batched
 bin. The only caller in core is the Views options UI
 (`GroupwiseMax::submitOptionsForm()`).
 
-A contributed module can still do it, and the module has no way to notice. If
-any code on your site does one of these against `render`, `data`, `menu` or
-`dynamic_page_cache`, that bin must come off the list:
+A contributed module can still do it, and this module has no way to notice. Two
+patterns against `render`, `menu` or `dynamic_page_cache` take that bin off the
+list. The first is a per-key delete or invalidation:
 
 ```php
 \Drupal::cache('render')->delete($cid);
-\Drupal::cache('data')->deleteMultiple($cids);
-\Drupal::cache('menu')->invalidate($cid);
+\Drupal::cache('menu')->deleteMultiple($cids);
+\Drupal::cache('render')->invalidate($cid);
 ```
 
-Deleting the whole bin, invalidating by cache tag, and writing are all fine -
-those are handled. It is the per-key `delete()` and `invalidate()` from *another*
-request that can be undone, and only during the window in which the write is
-still queued.
-
-To check a site, the cheapest test is to grep for it:
-
-```bash
-grep -rn "cache('\(render\|data\|menu\|dynamic_page_cache\)')" web/modules/contrib \
-  | grep -E "->(delete|deleteMultiple|invalidate|invalidateMultiple)\("
-```
-
-Then take any bin that turns up out of the list:
+The second is subtler, and is what took `cache.data` off the list: reading a key
+to decide whether to correct it. A queued write is invisible to another request's
+read, so it concludes from the absence and writes nothing - and the queued value
+lands afterwards, unopposed.
 
 ```php
-$settings['redis_rtt_batched_bins'] = ['render', 'menu', 'dynamic_page_cache'];
+// Another request may be about to write this very key.
+if (\Drupal::cache('render')->get($cid) === FALSE) {
+  // ... so this branch runs when it should not have.
+}
+```
+
+Deleting the whole bin, invalidating by cache tag, and plain writing are all
+fine: those are handled. Both risky patterns only bite across requests, and only
+during the window in which a write is still queued.
+
+Grep narrows this down; it cannot settle it. Code reaches a bin three ways, and
+only one of them puts the bin name on the same line as the call:
+
+```php
+\Drupal::cache('render')->delete($cid);      // a grep finds this
+$cache = \Drupal::cache('render');
+$cache->delete($cid);                        // and not this
+$this->cacheRender->delete($cid);            // nor this, the common one
+```
+
+The third is the usual shape in Drupal - core alone has 36 per-key deletes
+against an injected cache backend - so start from what gets a batched bin
+injected, then read those classes:
+
+```bash
+# Services handed one of the batched bins, and direct calls by name.
+grep -rnE 'cache\.(render|menu|dynamic_page_cache)' \
+  web/modules web/themes --include='*.yml'
+grep -rn "Drupal::cache('\(render\|menu\|dynamic_page_cache\)')" \
+  web/modules web/themes
+```
+
+What settles it is watching the wire while the site is used - saving content,
+running cron, submitting the forms your editors submit:
+
+```bash
+redis-cli MONITOR \
+  | grep -E '"(DEL|UNLINK|HDEL)"' \
+  | grep -E ':(render|menu|dynamic_page_cache):'
+```
+
+Anything at all here means that bin comes off the list:
+
+```php
+$settings['redis_rtt_batched_bins'] = ['render', 'dynamic_page_cache'];
 ```
 
 
@@ -437,18 +492,24 @@ from the module's own counter (`redis_rtt_report`), which counts one wait per
 un-pipelined command and one per `exec()`.
 
 Because that counter is not free, round trips and wall time were measured in
-separate runs - never the same one. Each figure is the median of three runs;
-the round trip counts were identical across all three.
+separate runs - never the same one. Each figure is the median of three runs.
+
+On the cold scenarios the three runs returned the same count every time. The
+warm ones vary by a trip or two - a warm node view came back as 14, 14 and 16 -
+because what a warm page reads depends on what the previous request left in
+APCu. Those rows are given as ranges below for that reason, and a difference of
+one or two trips between the last two columns there is noise, not batching:
+batching does nothing on a page that writes nothing.
 
 ### Round trips
 
 | scenario, authenticated | stock | module, no batching | module |
 |---|---|---|---|
-| view a node, first request after a flush | 818 | 694 | **440** |
-| view a node, cold | 815 | 690 | **436** |
-| content listing, cold | 515 | 447 | **297** |
-| edit form, cold | 322 | 304 | **255** |
-| view a node, warm | 24 | 16 | **14** |
+| view a node, first request after a flush | 818 | 694 | **449** |
+| view a node, cold | 815 | 690 | **445** |
+| content listing, cold | 515 | 447 | **312** |
+| edit form, cold | 322 | 304 | **266** |
+| view a node, warm | 24 | 14-18 | **14-16** |
 | edit form, warm | 61 | 32 | **32** |
 | content listing, warm | 166 | 86 | **86** |
 
@@ -462,8 +523,8 @@ columns being different numbers: the work is the same, the waiting is not.
 Batching accounts for the whole difference between the last two columns, and
 only on cold pages: a warm page writes nothing, so there is nothing to batch.
 What it does on a cold page is visible directly - of about 3,400 cache entries
-written, 250 are in batched bins, and those 250 travel in 3 round trips instead
-of 250. The other 3,100 are `cache.entity`, which Drupal already writes in bulk:
+written, 241 are in batched bins, and those 241 travel in 3 round trips instead
+of 241. The other 3,100 are `cache.entity`, which Drupal already writes in bulk:
 3,109 entries in 91 round trips.
 
 ### Wall time
@@ -527,8 +588,8 @@ symptom.
 
 **A:** For four bins, yes; for everything else, no.
 
-Writes to `cache.render`, `cache.data`, `cache.menu` and
-`cache.dynamic_page_cache` are held in memory and sent in batches - when 100
+Writes to `cache.render`, `cache.menu` and `cache.dynamic_page_cache` are held
+in memory and sent in batches - when 100
 have accumulated, and again at the end of the request. Everything else, and
 every `delete()` and invalidation, goes to Redis at exactly the point the stock
 backend sends it.

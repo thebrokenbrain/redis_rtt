@@ -231,15 +231,15 @@ class WriteBatchTest extends UnitTestCase {
     $this->assertArrayHasKey('after', $backend->getMultiple($cids), 'An entry written after the flush survives it.');
 
     // An entry queued before a flush must not be readable after it.
-    $backend = $this->backend('data', $batch);
+    $backend = $this->backend('menu', $batch);
     $backend->set('before', 'value');
     $backend->deleteAll();
     $backend->set('before', 'value');
-    $stale = $batch->getPending('p:data:before');
+    $stale = $batch->getPending('p:menu:before');
     $this->assertNotNull($stale);
     // Force it to look older than the flush, as a slow request's write would.
-    $batch->drop(['p:data:before']);
-    $this->client->data['p:data:before'] = [
+    $batch->drop(['p:menu:before']);
+    $this->client->data['p:menu:before'] = [
       'cid' => 'before',
       'created' => 1,
       'expire' => -1,
@@ -314,15 +314,15 @@ class WriteBatchTest extends UnitTestCase {
   public function testDeleteAllDiscardsThatBinsQueuedWrites(): void {
     $batch = $this->batch();
     $render = $this->backend('render', $batch);
-    $data = $this->backend('data', $batch);
+    $menu = $this->backend('menu', $batch);
 
     $render->set('gone', 'value');
-    $data->set('kept', 'value');
+    $menu->set('kept', 'value');
     $render->deleteAll();
     $batch->send();
 
     $this->assertArrayNotHasKey('p:render:gone', $this->client->data);
-    $this->assertArrayHasKey('p:data:kept', $this->client->data, 'Another bin must not lose its writes.');
+    $this->assertArrayHasKey('p:menu:kept', $this->client->data, 'Another bin must not lose its writes.');
   }
 
   /**
@@ -442,6 +442,33 @@ class WriteBatchTest extends UnitTestCase {
     $this->assertSame(0, $batch->getStats()['writes'], 'None of those writes should have been queued.');
   }
 
+
+  /**
+   * cache.data is not batched, and that is a decision rather than an oversight.
+   *
+   * It was on the list until a review found the pattern the three conditions
+   * miss. The contributed redirect module keeps redirect_prefix_list:<prefix>
+   * in cache.data - permanent, untagged, holding the answer to "does any
+   * redirect start with this prefix" - and Redirect::postSave() corrects that
+   * entry only if it *reads* it and finds FALSE. A queued write is invisible to
+   * that read, so the correction never happens and the queued FALSE lands
+   * afterwards: a redirect the editor can see in the admin listing answers 404
+   * for a year.
+   *
+   * The general point is that cache.data is a scratch bin any module writes to
+   * however it likes, unlike render, menu and dynamic_page_cache, which core
+   * writes to with one discipline.
+   *
+   * @covers ::handles
+   */
+  public function testTheDataBinIsNotBatched(): void {
+    $batch = $this->batch();
+    $this->assertFalse($batch->handles('data'), 'cache.data must not be batched by default.');
+
+    $this->backend('data', $batch)->set('now', 'value');
+    $this->assertArrayHasKey('p:data:now', $this->client->data, 'Its writes must reach Redis immediately.');
+  }
+
   /**
    * A bin nobody has checked is not batched either.
    *
@@ -501,13 +528,13 @@ class WriteBatchTest extends UnitTestCase {
   public function testOneBatchServesEveryBin(): void {
     $batch = $this->batch();
     $render = $this->backend('render', $batch);
-    $data = $this->backend('data', $batch);
     $menu = $this->backend('menu', $batch);
+    $paginas = $this->backend('dynamic_page_cache', $batch);
     $this->client->resetCounters();
 
     $render->set('a', 1);
-    $data->set('b', 2);
-    $menu->set('c', 3);
+    $menu->set('b', 2);
+    $paginas->set('c', 3);
     $batch->send();
 
     $this->assertSame(1, $this->client->roundTrips, 'Three bins, one wait.');
@@ -615,6 +642,44 @@ class WriteBatchTest extends UnitTestCase {
 
     $this->assertSame(4200, $this->client->ttls['p:render:caduca'], 'An entry with an expiry keeps it: 600 s plus the default offset.');
     $this->assertSame(31536000, $this->client->ttls['p:render:permanente'], 'A permanent entry gets the backend default, not "no expiry".');
+  }
+
+
+  /**
+   * A pipeline that fails takes its connection out of service.
+   *
+   * A read timeout mid-pipeline leaves phpredis holding a socket with replies
+   * still queued on it, and the next command reads the previous one's. On a
+   * persistent connection that socket goes to the next request: measured, a
+   * read of one key answering with the value of another, from another bin.
+   *
+   * Reproduced outside the suite against a real Redis with CLIENT PAUSE, where
+   * closing the connection is the difference between "DESINCRONIZADA" and
+   * "COHERENTE". Here the assertion is only that the close happens, which is
+   * the part this module controls.
+   *
+   * @covers ::send
+   * @covers ::discard
+   */
+  public function testAFailedPipelineClosesItsConnection(): void {
+    $client = new FailingPipelineClient();
+    $factory = $this->createMock(ClientFactory::class);
+    $factory->method('getClient')->willReturn($client);
+    $batch = new WriteBatch($factory, new Settings([]));
+
+    $backend = new BatchingRedisBackend('render', $this->client, $this->createMock(CacheTagsChecksumInterface::class), new PhpSerialize(), $batch);
+    $backend->setPrefix(self::PREFIX);
+    $backend->set('cualquiera', 'value');
+
+    try {
+      $batch->send();
+      $this->fail('The failure must propagate.');
+    }
+    catch (\RuntimeException) {
+      // Expected: ::send() does not swallow.
+    }
+
+    $this->assertTrue($client->closed, 'A connection that failed mid-pipeline must not be handed to the next request.');
   }
 
   /**

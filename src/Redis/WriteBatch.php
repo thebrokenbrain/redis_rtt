@@ -41,6 +41,23 @@ use Drupal\redis\ClientInterface;
  *   serving the new title.
  * - None of them is a chained-fast bin, so there is no "last write" marker that
  *   has to reach Redis behind the data it announces.
+ * - Nothing reads one of their keys to decide whether to correct it. This is
+ *   the condition cache.data failed, and it is not the same as the first: the
+ *   danger is not a delete the flush undoes but a *read* that misses a write
+ *   still in the queue and concludes from its absence. See below.
+ *
+ * cache.data was on this list until a review found what the fourth condition is
+ * for. The contributed redirect module keeps redirect_prefix_list:<prefix> there
+ * - permanent, untagged, and holding the answer to "does any redirect start with
+ * this prefix". Redirect::postSave() corrects that entry only if it *reads* it
+ * and finds FALSE; a queued write is invisible to that read, so the correction
+ * never happens and the queued FALSE lands afterwards. A redirect the editor can
+ * see in the admin listing then answers 404 for a year.
+ *
+ * The lesson is about the bin, not the module: cache.data is a general-purpose
+ * scratch bin that any module writes to with whatever discipline it likes, while
+ * render, menu and dynamic_page_cache are written by core to one. A bin nobody
+ * owns cannot be checked once and trusted.
  *
  * cache.entity, cache.default and the chained-fast bins each fail one of those,
  * and they lose almost nothing by writing immediately: cache.entity already
@@ -174,7 +191,6 @@ LUA;
     // inverted default is what the removed version got wrong.
     $this->batchedBins = (array) $get('redis_rtt_batched_bins', [
       'render',
-      'data',
       'menu',
       'dynamic_page_cache',
     ]);
@@ -322,8 +338,49 @@ LUA;
       $client->exec();
       $this->sendCount++;
     }
+    catch (\Exception $e) {
+      static::discard($client ?? NULL);
+      $this->client = NULL;
+      throw $e;
+    }
     finally {
       $this->sending = FALSE;
+    }
+  }
+
+  /**
+   * Closes a connection that failed mid-pipeline, so nothing reuses it.
+   *
+   * A read timeout inside a pipeline leaves phpredis holding a socket with
+   * replies still queued on it, and the next command reads the *previous*
+   * command's reply. On a persistent connection that socket is then handed to
+   * the next request, which is how a read of one key returns the value of
+   * another - measured across bins, a cache.render get answering with a
+   * cache.entity value.
+   *
+   * Closing it costs nothing when Redis is healthy, because this only runs
+   * after a failure, and phpredis reconnects on the next command. It is worth
+   * doing wherever this module opens a pipeline of scripts:
+   * \Drupal\redis_rtt\Cache\BatchingRedisBackend::invalidateMultiple() and
+   * \Drupal\redis_rtt\Lock\LuaRedisLock do the same.
+   *
+   * Stock redis never sees this, and not because it handles it: it sets no read
+   * timeout at all, so it waits out the stall instead of timing out. The
+   * bounded read this module adds is the right trade - an unbounded one turns a
+   * failover into an outage - but it has to clean up after itself.
+   *
+   * @param \Drupal\redis\ClientInterface|null $client
+   *   The client whose connection failed, if there was one.
+   */
+  public static function discard(?ClientInterface $client): void {
+    if (!$client) {
+      return;
+    }
+    try {
+      $client->close();
+    }
+    catch (\Exception) {
+      // Already gone, which is the state being aimed for.
     }
   }
 

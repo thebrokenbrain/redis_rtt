@@ -22,7 +22,16 @@ use Drupal\redis\ClientInterface;
 class CountingClient implements ClientInterface {
 
   /**
-   * Number of network waits: one per non-pipelined command, one per exec().
+   * Number of network waits.
+   *
+   * One per command sent on its own, and one per exec(). A pipeline is one
+   * wait: phpredis holds the commands locally and exec() hands them over.
+   *
+   * A MULTI block is not, and counting it as one under-reports. phpredis sends
+   * each command inside MULTI as it is called and reads back +QUEUED, so a
+   * WATCH / GET / MULTI / DEL / EXEC release costs five waits, not three.
+   * Nothing in this module uses MULTI - its locks and its batches are Lua - so
+   * the error only ever ran against the stock backend it is compared with.
    */
   public static int $roundTrips = 0;
 
@@ -52,6 +61,11 @@ class CountingClient implements ClientInterface {
    */
   protected bool $inPipeline = FALSE;
 
+  /**
+   * Whether the open block is a MULTI, where queued commands still cost a wait.
+   */
+  protected bool $inMulti = FALSE;
+
   public function __construct(protected ClientInterface $inner) {}
 
   /**
@@ -70,6 +84,11 @@ class CountingClient implements ClientInterface {
 
     if ($lower === 'pipeline' || $lower === 'multi') {
       $this->inPipeline = TRUE;
+      $this->inMulti = $lower === 'multi';
+      if ($this->inMulti) {
+        // MULTI itself is sent and acknowledged.
+        static::$roundTrips++;
+      }
       return $this->inner->__call($name, $arguments);
     }
 
@@ -84,7 +103,11 @@ class CountingClient implements ClientInterface {
     }
 
     if ($this->inPipeline && $lower !== 'exec') {
-      // Queued locally, no network wait yet.
+      if ($this->inMulti) {
+        // Sent now and answered with +QUEUED, so it is a wait like any other.
+        static::$roundTrips++;
+      }
+      // Otherwise queued locally, with no network wait yet.
       return $this->inner->__call($name, $arguments);
     }
 
@@ -97,6 +120,7 @@ class CountingClient implements ClientInterface {
       static::$roundTrips++;
       if ($lower === 'exec') {
         $this->inPipeline = FALSE;
+        $this->inMulti = FALSE;
       }
     }
   }

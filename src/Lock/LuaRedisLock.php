@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Drupal\redis_rtt\Lock;
 
 use Drupal\redis\Lock\RedisLock;
+use Drupal\redis_rtt\Redis\WriteBatch;
 
 /**
  * Redis lock backend that uses one round trip per operation.
@@ -101,11 +102,19 @@ LUA;
 
     // Every held lock released in a single round trip. Each EVAL declares
     // exactly one key, so this stays correct under cluster mode too.
-    $this->client->pipeline();
-    foreach ($names as $name) {
-      $this->client->eval(static::RELEASE_LUA, [$this->getKey($name), $id], 1);
+    try {
+      $this->client->pipeline();
+      foreach ($names as $name) {
+        $this->client->eval(static::RELEASE_LUA, [$this->getKey($name), $id], 1);
+      }
+      $this->client->exec();
     }
-    $this->client->exec();
+    catch (\Exception $e) {
+      // A pipeline of scripts that times out mid-flight leaves the connection
+      // reading the previous command's replies. See WriteBatch::discard().
+      WriteBatch::discard($this->client);
+      throw $e;
+    }
   }
 
 }

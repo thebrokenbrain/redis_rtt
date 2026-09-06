@@ -33,8 +33,10 @@ services:
   # ---------------------------------------------------------------------------
   # 2. Locks with single-round-trip release and extend.
   #
-  # Replaces the redis module's RedisLock (WATCH/GET/MULTI/EXEC = 3 round trips
-  # per release) with the standard Lua compare-and-swap.
+  # Replaces the redis module's RedisLock with the standard Lua
+  # compare-and-swap. Its WATCH/GET/MULTI/EXEC release costs five round trips,
+  # not three: phpredis sends each command inside a MULTI block and reads back
+  # +QUEUED, so the block is one wait per command rather than one in total.
   # ---------------------------------------------------------------------------
   lock:
     class: Drupal\Core\Lock\LockBackendInterface

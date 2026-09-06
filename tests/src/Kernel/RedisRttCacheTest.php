@@ -80,9 +80,11 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
     $settings['redis.connection']['interface'] = getenv('REDIS_INTERFACE') ?: 'PhpRedis';
     $settings['redis.connection']['host'] = $host;
     $settings['redis.connection']['port'] = $port;
-    // A prefix per test run, so two runs against the same Redis cannot see each
-    // other's keys and a failure is never someone else's leftovers.
-    $settings['cache_prefix'] = 'rtt_test_' . getmypid() . '_' . substr(hash('sha256', static::class . microtime()), 0, 8);
+    // Isolation between runs against the same Redis comes from the test
+    // framework, which already namespaces every key with its own database
+    // prefix (test46520047:page:...). Setting cache_prefix here looked like it
+    // provided that and did not: the redis module derives the prefix and never
+    // reads this. A dead line crediting the wrong mechanism is worse than none.
     if ($this->extraBatchedBins) {
       $settings['redis_rtt_batched_bins'] = array_merge(
         ['render', 'data', 'menu', 'dynamic_page_cache'],
