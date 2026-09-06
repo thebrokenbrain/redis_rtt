@@ -84,8 +84,10 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
 
     $response = $this->httpKernel->handle($request, $type, $catch);
 
-    // Send whatever is still queued, so the counts below include it.
-    $this->batch?->send();
+    // Send whatever is still queued, so the counts below include it. Quietly:
+    // the response is already built, and a diagnostic header is no reason to
+    // turn a failed cache write into a failed request.
+    $this->batch?->sendQuietly();
 
     $response->headers->set('X-Redis-RTT', implode('; ', $this->report()));
 

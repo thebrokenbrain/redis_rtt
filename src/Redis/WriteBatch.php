@@ -274,6 +274,22 @@ LUA;
 
   /**
    * Sends everything queued as a single pipeline.
+   *
+   * A failure propagates, exactly as the stock backend's write does. Batching
+   * changes how many waits a request spends, and it should not quietly change
+   * whether a request notices that Redis has stopped accepting writes: a full
+   * instance under a noeviction policy, or a replica promoted to read-only,
+   * both answer reads and refuse writes, and stock returns a 500 for that.
+   *
+   * The queue is emptied before the send, so a failure drops those entries
+   * rather than holding them for the next attempt. Re-queueing would risk
+   * sending an entry that a delete has since made wrong, which is the whole
+   * failure this design exists to avoid; and they are cache entries, so the
+   * cost of dropping them is that something recomputes them.
+   *
+   * @throws \Exception
+   *   Whatever the client raises. ::sendQuietly() is the variant for callers
+   *   with no request left to fail.
    */
   public function send(): void {
     if ($this->sending || !$this->pending) {
@@ -298,17 +314,29 @@ LUA;
       $client->exec();
       $this->sendCount++;
     }
+    finally {
+      $this->sending = FALSE;
+    }
+  }
+
+  /**
+   * Sends everything queued, reporting a failure rather than raising it.
+   *
+   * This is what the end of the request uses. By then the response has been
+   * sent - in PHP-FPM the client already has every byte of it - so there is no
+   * request left to fail, and an exception here would only put a fatal in the
+   * log after the fact. Everything else calls ::send() and gets the stock
+   * behaviour.
+   */
+  public function sendQuietly(): void {
+    try {
+      $this->send();
+    }
     catch (\Exception $e) {
-      // Never fatal: this is cache data, and the cost of losing it is that the
-      // next request recomputes it. Re-queueing would risk sending an entry
-      // that a delete has since made wrong.
       if (Settings::get('redis_rtt_log_errors', FALSE)) {
         // phpcs:ignore Drupal.Semantics.FunctionTriggerError
         trigger_error('redis_rtt: batched write failed: ' . $e->getMessage(), E_USER_WARNING);
       }
-    }
-    finally {
-      $this->sending = FALSE;
     }
   }
 
@@ -359,10 +387,10 @@ LUA;
     }
     $this->shutdownRegistered = TRUE;
     if (function_exists('drupal_register_shutdown_function')) {
-      drupal_register_shutdown_function([$this, 'send']);
+      drupal_register_shutdown_function([$this, 'sendQuietly']);
     }
     else {
-      register_shutdown_function([$this, 'send']);
+      register_shutdown_function([$this, 'sendQuietly']);
     }
   }
 

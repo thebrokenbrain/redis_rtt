@@ -212,13 +212,21 @@ instance - raises the same `RedisException` from the same place as the stock
 backend, and the request fails with it. There is no setting to change that,
 because there is no difference from stock to change.
 
-The one exception is a batch that fails on its way out. That is swallowed, and
-deliberately: it happens in a shutdown function after the response has already
-been sent, so there is no request left to fail, and the cost of losing the
-entries is that the next request recomputes them. The failed entries are dropped
-rather than retried - a delete may have happened in the meantime, and resending
-would be the resurrection this design exists to avoid. Set
-`redis_rtt_log_errors` to see them.
+That includes a batch that fails while the request is still running - when 100
+writes have accumulated and the batch goes out mid-request. A full instance under
+a noeviction policy, or a replica promoted to read-only, answers reads and
+refuses writes; stock returns a 500 for that, and so does this.
+
+The one place a failure is reported rather than raised is the batch sent at the
+end of the request. By then the response has gone out - in PHP-FPM the client
+already has every byte of it - so there is no request left to fail, and raising
+would only put a fatal in the log after the fact. Set `redis_rtt_log_errors` to
+see those.
+
+Either way the entries in a failed batch are dropped rather than retried. They
+are cache entries, so the cost is that something recomputes them; resending them
+later would risk writing back an entry that a delete has since made wrong, which
+is the failure this whole design exists to avoid.
 
 The connection accepts these on top of the redis module's own: `tls`, `timeout`,
 `read_timeout`, `retry_interval`, `persistent_id`, `user`, `verify_peer`.

@@ -542,25 +542,89 @@ class WriteBatchTest extends UnitTestCase {
   }
 
   /**
-   * A failing send loses the writes rather than the request.
+   * A send that fails during the request fails the request, as stock does.
    *
-   * Cache data is recomputable; a fatal error is not. Re-queueing would be
-   * worse than dropping, because a delete may have happened in between.
+   * A full instance under a noeviction policy, or a replica promoted to
+   * read-only, answers reads and refuses writes. The stock backend returns a
+   * 500 for that, and batching must not quietly turn it into a page served with
+   * nothing cached.
    *
    * @covers ::send
    */
-  public function testFailingSendsAreNotFatal(): void {
-    $factory = $this->createMock(ClientFactory::class);
-    $factory->method('getClient')->willThrowException(new \RuntimeException('Redis is gone'));
-    $batch = new WriteBatch($factory, new Settings([]));
-
-    $backend = new BatchingRedisBackend('render', $this->client, $this->createMock(CacheTagsChecksumInterface::class), new PhpSerialize(), $batch);
-    $backend->setPrefix(self::PREFIX);
+  public function testFailingSendsRaise(): void {
+    $batch = $this->brokenBatch();
+    $backend = $this->backendFor($batch);
     $backend->set('lost', 'value');
 
+    $this->expectException(\RuntimeException::class);
     $batch->send();
+  }
+
+  /**
+   * The end-of-request send reports a failure instead of raising it.
+   *
+   * By then the response has gone out, so there is no request left to fail.
+   *
+   * @covers ::sendQuietly
+   */
+  public function testTheEndOfRequestSendDoesNotRaise(): void {
+    $batch = $this->brokenBatch();
+    $backend = $this->backendFor($batch);
+    $backend->set('lost', 'value');
+
+    $batch->sendQuietly();
 
     $this->assertSame(0, $batch->getStats()['pending'], 'The failed writes must not pile up for the next send.');
+  }
+
+  /**
+   * A failed send drops its writes rather than holding them for the next one.
+   *
+   * Re-queueing would risk sending an entry that a delete has since made wrong,
+   * which is the failure this whole design exists to avoid.
+   *
+   * @covers ::send
+   */
+  public function testFailedWritesAreDroppedNotRetried(): void {
+    $batch = $this->brokenBatch();
+    $backend = $this->backendFor($batch);
+    $backend->set('lost', 'value');
+
+    $batch->sendQuietly();
+    $this->assertSame(0, $batch->getStats()['pending']);
+
+    // A second send has nothing left to try.
+    $batch->sendQuietly();
+    $this->assertSame(0, $batch->getStats()['pending']);
+  }
+
+  /**
+   * Builds a batch whose client always fails.
+   *
+   * @return \Drupal\redis_rtt\Redis\WriteBatch
+   *   The batch.
+   */
+  protected function brokenBatch(): WriteBatch {
+    $factory = $this->createMock(ClientFactory::class);
+    $factory->method('getClient')->willThrowException(new \RuntimeException('Redis is gone'));
+
+    return new WriteBatch($factory, new Settings([]));
+  }
+
+  /**
+   * Builds a render backend over a given batch.
+   *
+   * @param \Drupal\redis_rtt\Redis\WriteBatch $batch
+   *   The batch to write through.
+   *
+   * @return \Drupal\redis_rtt\Cache\BatchingRedisBackend
+   *   The backend.
+   */
+  protected function backendFor(WriteBatch $batch): BatchingRedisBackend {
+    $backend = new BatchingRedisBackend('render', $this->client, $this->createMock(CacheTagsChecksumInterface::class), new PhpSerialize(), $batch);
+    $backend->setPrefix(self::PREFIX);
+
+    return $backend;
   }
 
   /**
