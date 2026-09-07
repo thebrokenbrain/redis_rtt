@@ -58,4 +58,21 @@ final class RecordingFastPhpRedisFactory extends FastPhpRedisFactory {
     return new FakeRedisClient();
   }
 
+  /**
+   * Exposes the read timeout the real ::connect() would have used.
+   *
+   * ::connect() is replaced wholesale above, which is what makes this factory
+   * testable without a socket - and also what puts everything decided inside it
+   * out of reach. This hands back the one decision that has a wrong answer.
+   *
+   * @param array<string, mixed> $settings
+   *   The connection settings.
+   *
+   * @return float
+   *   The read timeout that would be handed to phpredis.
+   */
+  public function readTimeoutFor(array $settings): float {
+    return $this->readTimeout($settings);
+  }
+
 }

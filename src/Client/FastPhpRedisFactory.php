@@ -37,7 +37,9 @@ use Drupal\redis\ClientInterface;
  * Recognised keys in $settings['redis.connection'], on top of the stock ones:
  *   - tls: (bool) wrap the connection in TLS, for in-transit encryption.
  *   - timeout: (float) connect timeout in seconds, default 1.0.
- *   - read_timeout: (float) read timeout in seconds, default 1.0.
+ *   - read_timeout: (float) read timeout in seconds, default 1.0. Zero or
+ *     less means no limit, which is the stock behaviour and the one this
+ *     class exists to replace; see ::readTimeout().
  *   - retry_interval: (int) milliseconds between connect retries, default 100.
  *   - persistent_id: (string) connection pool identifier.
  *   - user: (string) ACL username, for Redis 6 style authentication.
@@ -121,7 +123,7 @@ class FastPhpRedisFactory extends PhpRedisFactory {
     }
     $port = (int) $settings['port'];
     $timeout = (float) ($settings['timeout'] ?? 1.0);
-    $read_timeout = (float) ($settings['read_timeout'] ?? 1.0);
+    $read_timeout = $this->readTimeout($settings);
     $retry_interval = (int) ($settings['retry_interval'] ?? 100);
     $persistent_id = (string) ($settings['persistent_id'] ?? 'drupal');
 
@@ -193,6 +195,39 @@ class FastPhpRedisFactory extends PhpRedisFactory {
     }
 
     return new FastPhpRedis($redis);
+  }
+
+  /**
+   * Returns the read timeout to hand phpredis, in seconds.
+   *
+   * A non-positive setting means "no limit", which is what phpredis documents
+   * and what an operator writing 0 is asking for. It cannot be passed on as
+   * written, though: measured on phpredis 6.3.0, leaving read_timeout out of
+   * ::connect() entirely works and reports back 0.0, while passing 0.0
+   * explicitly makes the first read fail with "socket error on read socket" -
+   * the same value, a different code path. Since this class always passes the
+   * parameter, a site that set 0 got a RedisException on every request and an
+   * HTTP 500 on every page, where the stock factory - which never passes the
+   * key at all - serves the site normally. A negative value reaches the
+   * unlimited behaviour reliably, so that is what a non-positive setting is
+   * normalised to.
+   *
+   * Honouring it rather than refusing it is deliberate. An unbounded read is
+   * the failure mode this class exists to avoid, and choosing it throws that
+   * away - but it is an explicit setting, written by someone who wanted the
+   * stock behaviour back, and silently overriding an operator is worse than
+   * letting them have what they asked for.
+   *
+   * @param array<string, mixed> $settings
+   *   The connection settings.
+   *
+   * @return float
+   *   The read timeout, or a negative value meaning no limit.
+   */
+  protected function readTimeout(#[\SensitiveParameter] array $settings): float {
+    $read_timeout = (float) ($settings['read_timeout'] ?? 1.0);
+
+    return $read_timeout > 0 ? $read_timeout : -1.0;
   }
 
   /**

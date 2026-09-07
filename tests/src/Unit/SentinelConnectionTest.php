@@ -133,4 +133,74 @@ class SentinelConnectionTest extends UnitTestCase {
     $this->assertNull($factory->connected, 'Nothing may be connected to when there is no master.');
   }
 
+  /**
+   * A read timeout of zero means no limit, and does not take the site down.
+   *
+   * Phpredis documents zero as "no limit" and its own default reports back as
+   * 0.0, so an operator who wants the stock unbounded behaviour writes 0. But
+   * passing 0.0 explicitly is not the same code path as leaving it out: on
+   * phpredis 6.3.0 the first read then fails with "socket error on read
+   * socket", so every request raised a RedisException and every page was an
+   * HTTP 500 - against a stock twin, on the same Redis, serving 200. A
+   * non-positive setting is therefore normalised to a negative value, which
+   * reaches the unlimited behaviour without the crash.
+   *
+   * @dataProvider providerNonPositiveReadTimeouts
+   */
+  public function testNonPositiveReadTimeoutMeansNoLimit(mixed $configured): void {
+    $factory = new RecordingFastPhpRedisFactory();
+
+    $this->assertLessThan(
+      0,
+      $factory->readTimeoutFor(['host' => '127.0.0.1', 'port' => 6379, 'read_timeout' => $configured]),
+      'A non-positive read timeout must become the negative value phpredis treats as unlimited.',
+    );
+  }
+
+  /**
+   * The ways an operator can ask for an unbounded read.
+   *
+   * @return array<string, array{0: mixed}>
+   *   Test cases.
+   */
+  public static function providerNonPositiveReadTimeouts(): array {
+    return [
+      'integer zero' => [0],
+      'float zero' => [0.0],
+      'string zero' => ['0'],
+      'negative' => [-1],
+    ];
+  }
+
+  /**
+   * A positive read timeout is passed through untouched.
+   *
+   * The normalisation must not round, clamp or otherwise touch the value a
+   * site actually configured, which is the whole point of the setting.
+   */
+  public function testPositiveReadTimeoutIsPassedThrough(): void {
+    $factory = new RecordingFastPhpRedisFactory();
+
+    $this->assertSame(
+      0.25,
+      $factory->readTimeoutFor(['host' => '127.0.0.1', 'port' => 6379, 'read_timeout' => 0.25]),
+    );
+  }
+
+  /**
+   * With nothing configured, the bounded default applies.
+   *
+   * A missing setting is not a request for the stock unbounded read: it is a
+   * site that has not thought about it, and this class exists to give that site
+   * a bounded one.
+   */
+  public function testTheDefaultReadTimeoutIsBounded(): void {
+    $factory = new RecordingFastPhpRedisFactory();
+
+    $this->assertSame(
+      1.0,
+      $factory->readTimeoutFor(['host' => '127.0.0.1', 'port' => 6379]),
+    );
+  }
+
 }
