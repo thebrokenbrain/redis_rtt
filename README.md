@@ -12,7 +12,7 @@ another: each answer decides what to ask next.
 
 This module makes the same work wait for the network far less often. Reads that
 Drupal issues one at a time are gathered into single pipelines; the writes of
-four bins travel in batches instead of one round trip each.
+three bins travel in batches instead of one round trip each.
 
 What that changes is the waiting, not the work. Across the seven scenarios
 measured below the command count moves by between 0.5% and 23%, while the number
@@ -203,7 +203,7 @@ $settings['bootstrap_container_definition'] = [
 
 `redis_rtt_batched_bins` defaults to `['render', 'menu',
 'dynamic_page_cache']`. It is a list of bins that have been checked against the
-three conditions in **Batched writes** below, not a list of bins that have been
+four conditions in **Batched writes** below, not a list of bins that have been
 ruled out: every other bin, including any a contributed module declares, writes
 immediately. Remove a bin from the list if a module on your site deletes its
 keys one at a time. Setting `redis_rtt_batch_writes` to `FALSE` restores the
@@ -406,7 +406,7 @@ or set `redis_rtt_batch_writes` to `FALSE`.
 
 ### Does your site do this?
 
-The batching is safe for the four bins above because nothing deletes or
+The batching is safe for the three bins above because nothing deletes or
 invalidates their keys one at a time. Core does not: `MONITOR` over four
 independent sweeps - 131,000 commands of node, term, user, alias, menu and
 config saves, tag invalidation, cron, config import and export, and installing
@@ -602,13 +602,12 @@ symptom.
 
 **Q: Does this module change when my cache writes reach Redis?**
 
-**A:** For four bins, yes; for everything else, no.
+**A:** For three bins, yes; for everything else, no.
 
 Writes to `cache.render`, `cache.menu` and `cache.dynamic_page_cache` are held
-in memory and sent in batches - when 100
-have accumulated, and again at the end of the request. Everything else, and
-every `delete()` and invalidation, goes to Redis at exactly the point the stock
-backend sends it.
+in memory and sent in batches - when 100 have accumulated, and again at the end
+of the request. Everything else, and every `delete()` and invalidation, goes to
+Redis at exactly the point the stock backend sends it.
 
 The consequence to understand is that an entry in a batched bin, written on one
 web node, is not readable from another until that batch goes out. Within the

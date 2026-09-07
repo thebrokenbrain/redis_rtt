@@ -191,7 +191,7 @@ LUA;
     $this->enabled = (bool) $get('redis_rtt_batch_writes', TRUE);
     $this->limit = max(1, (int) $get('redis_rtt_max_batched_writes', 100));
     // A list of what may be batched, not a list of what may not. The three
-    // conditions above were checked against these four bins one at a time; a
+    // conditions above were checked against these three bins one at a time; a
     // bin nobody has checked has not earned the benefit of the doubt, and an
     // exclusion list would hand it to every bin a contrib module adds. That
     // inverted default is what the removed version got wrong.
