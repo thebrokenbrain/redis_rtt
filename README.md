@@ -526,6 +526,29 @@ batching does nothing on a page that writes nothing.
 | edit form, warm | 61 | 32 | **32** |
 | content listing, warm | 166 | 86 | **86** |
 
+**"Cold" above means this module's caches are cold, not everything.** The bench
+protocol leaves core's chained-fast front for `cache.config` valid, so the
+measured request does not re-read configuration. That is one legitimate cold
+state and not the only one: the first request a worker serves after a cache
+rebuild finds that front stale and reads config back from Redis one key at a
+time - measured, 279 extra `HGETALL`s. The same page then costs:
+
+| scenario, authenticated | stock | module |
+|---|---|---|
+| view a node, everything cold including core's config front | 1,164-1,168 | **755-759** |
+
+Reproduced on two benches and two SAPIs (`php -S` and nginx + php-fpm), within
+±4. Both sides pay about 350 waits more, so the saving is 35% here against 45%
+above - and slightly larger in absolute terms, 409 waits against 370. That block
+is `Drupal\Core\Cache\ChainedFastBackend`, which this module does not replace
+and does not batch: `WriteBatch::handles()` returns FALSE for `config`,
+`bootstrap` and `discovery` because they are chained-fast bins.
+
+The distinction is worth stating because it is easy to reproduce the wrong one.
+Measuring straight after `drush cr` gives a figure in between - 685 waits with
+this module on the same page - and none of the three is wrong; they are three
+different starting states.
+
 Commands are a different story, and the honest version of it is worse than this
 section used to claim.
 
