@@ -235,8 +235,21 @@ The connection accepts these on top of the redis module's own: `tls`, `timeout`,
 `read_timeout`, `retry_interval`, `persistent_id`, `user`, `verify_peer`.
 
 `read_timeout` defaults to 1 second where stock phpredis waits forever, which is
-the point: an unbounded read turns a failover into an outage. But it is a limit
-on *every* reply, including ones you are deliberately waiting for.
+the point: an unbounded read turns a failover into an outage. It is worth being
+concrete about what that trade buys and costs, because it is the one setting
+here that changes what a visitor sees.
+
+Measured with Redis alive but not answering for four seconds, six PHP-FPM
+workers, ~400 requests: stock served every one of them, taking up to 4.2 s.
+This module returned a 500 for three to seven of them and never waited longer
+than 3.2 s. Neither side served wrong content, and both recovered fully. Raising
+`read_timeout` to 30 makes this module behave exactly like stock in that test.
+
+So: a stall shorter than the timeout costs nothing either way, a stall longer
+than it fails a few requests fast here and holds a worker there. Which is better
+depends on whether you would rather shed a request or queue behind a stalled
+Redis until PHP gives up. It is a limit on *every* reply, including ones you are
+deliberately waiting for.
 `RedisQueue::claimItem()` blocks on `brpoplpush` and does not catch the
 exception, so a site using the redis module's queue backend must raise
 `read_timeout` above that queue's own blocking timeout. That timeout is

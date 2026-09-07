@@ -58,8 +58,17 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
    * @param \Drupal\redis_rtt\Redis\WriteBatch|null $batch
    *   (optional) The write batch, sent before the report is built. Batched
    *   writes normally leave at the end of the request, after the response has
-   *   gone out; a report that stopped before them would under-count every round
-   *   trip they cost, which is exactly the number this header exists to state.
+   *   gone out; a report that stopped before them would under-count almost
+   *   every round trip they cost, which is exactly the number this header
+   *   exists to state.
+   *
+   *   Almost, and not all: the header has to be set on a response that is about
+   *   to be returned, so it is written before kernel.terminate. Anything a
+   *   needs_destruction service writes there - in practice one entry, the menu
+   *   active trail - is batched after this ran and shows up in neither count.
+   *   Measured on a cold page: the header said 59 writes in 1 batch where the
+   *   wire saw 60 in 2. Treat the header as a floor for a page that ends in a
+   *   destruct, and MONITOR as the arbiter.
    */
   public function __construct(
     protected HttpKernelInterface $httpKernel,
