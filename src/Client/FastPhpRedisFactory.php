@@ -31,8 +31,14 @@ use Drupal\redis\ClientInterface;
  * password-protected Redis: one new connection per fifty requests - the socket
  * really is reused - but two AUTHs per request either way.
  *
- * SELECT is skipped when phpredis already reports the connection on the wanted
- * database, which costs no round trip to check.
+ * SELECT is issued unconditionally whenever a database is configured. Skipping
+ * it when phpredis reports the connection already on that database - which this
+ * used to do, and which this paragraph went on describing after the code
+ * stopped - is not the free round trip it looks like: phpredis resets its own
+ * bookkeeping to 0 on every pconnect() while the pooled socket stays on
+ * whatever database it was left on, so the check compares 0 against 0 and sends
+ * nothing. Two sites sharing an FPM pool and a Redis host then read and write
+ * each other's databases. See ::connect().
  *
  * Recognised keys in $settings['redis.connection'], on top of the stock ones:
  *   - tls: (bool) wrap the connection in TLS, for in-transit encryption.
