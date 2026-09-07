@@ -776,9 +776,33 @@ class WriteBatchTest extends UnitTestCase {
     $backend = $this->backendFor($batch);
     $backend->set('lost', 'value');
 
-    $batch->sendQuietly();
+    // Through the registered callback rather than by calling ::sendQuietly()
+    // directly, so that the assertion is about the call site and not about a
+    // method invoked by hand. Pointing ::sendOnShutdown() at ::send() used to
+    // leave the whole suite green.
+    $this->runShutdown();
 
     $this->assertSame(0, $batch->getStats()['pending'], 'The failed writes must not pile up for the next send.');
+  }
+
+  /**
+   * A batch that goes out because it filled up fails the request.
+   *
+   * The distinction between ::send() and ::sendQuietly() only means something
+   * at the places that choose between them, and swapping them at any of the
+   * three used to leave every test passing. This covers the one that happens
+   * with the request still running, where stock returns a 500 and so must this.
+   *
+   * @covers ::add
+   */
+  public function testAFullBatchThatFailsRaises(): void {
+    $batch = $this->brokenBatch(['redis_rtt_max_batched_writes' => 2]);
+    $backend = $this->backendFor($batch);
+
+    $backend->set('uno', 'value');
+    $this->expectException(\RuntimeException::class);
+    // The second write fills the batch, so this is where it goes out.
+    $backend->set('dos', 'value');
   }
 
   /**
@@ -808,11 +832,11 @@ class WriteBatchTest extends UnitTestCase {
    * @return \Drupal\redis_rtt\Redis\WriteBatch
    *   The batch.
    */
-  protected function brokenBatch(): WriteBatch {
+  protected function brokenBatch(array $settings = []): WriteBatch {
     $factory = $this->createMock(ClientFactory::class);
     $factory->method('getClient')->willThrowException(new \RuntimeException('Redis is gone'));
 
-    return new WriteBatch($factory, new Settings([]));
+    return new WriteBatch($factory, new Settings($settings));
   }
 
   /**
