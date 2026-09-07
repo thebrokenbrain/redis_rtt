@@ -16,12 +16,12 @@ use Symfony\Component\DependencyInjection\Reference;
  *
  * WHY THIS EXISTS.
  *
- * It did not, and that was the largest hole in the suite. \Drupal\redis_rtt\Lock\LuaRedisLock
- * replaces the stock WATCH/GET/MULTI/EXEC protocol with Lua compare-and-swap,
- * and nothing asserted on the result: six deliberate mutations of the lock -
- * including one that made ::release() delete a lock held by anyone, and one that
- * dropped the NX from ::acquire() so two processes could hold it at once - left
- * the whole suite green.
+ * It did not, and that was the largest hole in the suite.
+ * \Drupal\redis_rtt\Lock\LuaRedisLock replaces the stock WATCH/GET/MULTI/EXEC
+ * protocol with Lua compare-and-swap, and nothing asserted on the result: six
+ * deliberate mutations of the lock - including one that made ::release() delete
+ * a lock held by anyone, and one that dropped the NX from ::acquire() so two
+ * processes could hold it at once - left the whole suite green.
  *
  * The stand-in in tests/src/Unit does not help here. It recognises the cache
  * scripts and reads the deciding line out of them, but it does not run Lua, so
@@ -33,12 +33,14 @@ use Symfony\Component\DependencyInjection\Reference;
  * written; what this class adds is the ownership half of the protocol, which is
  * where a compare-and-swap can be wrong without core's contract noticing.
  *
- * Skips itself when no Redis is reachable. A skip is a pass that proves nothing,
- * which is why the CI job for this module brings a Redis with it.
+ * Skips itself when no Redis is reachable. A skip is a pass that proves
+ * nothing, which is why the CI job for this module brings a Redis with it.
  *
  * @group redis_rtt
  */
 class LuaRedisLockTest extends LockTest {
+
+  use RedisAvailabilityTrait;
 
   /**
    * {@inheritdoc}
@@ -57,17 +59,13 @@ class LuaRedisLockTest extends LockTest {
   }
 
   /**
-   * Points the redis module at the Redis this test can reach, and skips if none.
+   * Points the redis module at a reachable Redis, or refuses to run.
+   *
+   * Which of the two it is depends on whether anything named a server: see
+   * RedisAvailabilityTrait::requireRedis().
    */
   protected function applyRedisSettings(): void {
-    $host = getenv('REDIS_HOST') ?: '127.0.0.1';
-    $port = (int) (getenv('REDIS_PORT') ?: 6379);
-
-    $socket = @fsockopen($host, $port, $errno, $error, 1);
-    if ($socket === FALSE) {
-      $this->markTestSkipped("No Redis reachable at $host:$port. Set REDIS_HOST and REDIS_PORT to run this.");
-    }
-    fclose($socket);
+    [$host, $port] = $this->requireRedis();
 
     $settings = Settings::getAll();
     $settings['redis.connection']['interface'] = getenv('REDIS_INTERFACE') ?: 'PhpRedis';

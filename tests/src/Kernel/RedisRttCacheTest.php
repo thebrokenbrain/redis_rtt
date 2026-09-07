@@ -33,6 +33,8 @@ use Symfony\Component\DependencyInjection\Reference;
  */
 class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
 
+  use RedisAvailabilityTrait;
+
   /**
    * {@inheritdoc}
    */
@@ -64,17 +66,13 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
   }
 
   /**
-   * Points the redis module at the Redis this test can reach, and skips if none.
+   * Points the redis module at a reachable Redis, or refuses to run.
+   *
+   * Which of the two it is depends on whether anything named a server: see
+   * RedisAvailabilityTrait::requireRedis().
    */
   protected function applyRedisSettings(): void {
-    $host = getenv('REDIS_HOST') ?: '127.0.0.1';
-    $port = (int) (getenv('REDIS_PORT') ?: 6379);
-
-    $socket = @fsockopen($host, $port, $errno, $error, 1);
-    if ($socket === FALSE) {
-      $this->markTestSkipped("No Redis reachable at $host:$port. Set REDIS_HOST and REDIS_PORT to run this.");
-    }
-    fclose($socket);
+    [$host, $port] = $this->requireRedis();
 
     $settings = Settings::getAll();
     $settings['redis.connection']['interface'] = getenv('REDIS_INTERFACE') ?: 'PhpRedis';
@@ -176,7 +174,7 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
   }
 
   /**
-   * A permanent entry gets a lifetime, an expiring one gets its own plus offset.
+   * A permanent entry gets a lifetime, an expiring one its own plus offset.
    *
    * The unit suite can assert the module hands a TTL to Redis; only this can
    * assert Redis received it. Both mutations a review found - never sending the
@@ -206,7 +204,8 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
    * An entry invalidated by cache tag is gone, and its neighbour is not.
    *
    * Inverting one line of the invalidation script used to leave the unit suite
-   * green, because the stand-in reimplemented the branch rather than reading it.
+   * green, because the stand-in reimplemented the branch rather than reading
+   * it.
    */
   public function testTagInvalidationReachesRedis(): void {
     $backend = $this->getCacheBackend();
