@@ -403,26 +403,26 @@ class PreloadingRedisCacheTagsChecksumTest extends UnitTestCase {
   }
 
   /**
-   * A speculative count answers once and is not pinned for the process.
+   * The freshness window bounds the consequence, not only the use.
    *
-   * The freshness window bounds when a count read ahead of time may be used; on
-   * its own it does nothing about how long the consequence lasts, because core
-   * folds whatever ::getTagInvalidationCounts() returns into its static tag
-   * cache and nothing empties that until the process ends. A count that was one
-   * millisecond young when it was consulted would otherwise stay authoritative
-   * for a whole cron run - which is the failure the window was added to
+   * On its own the window does nothing about how long the consequence lasts,
+   * because core folds whatever ::getTagInvalidationCounts() returns into its
+   * static tag cache and nothing empties that until the process ends. A count
+   * that was one millisecond young when it was consulted would otherwise stay
+   * authoritative for a whole cron run - the failure the window was added to
    * prevent, narrowed but not removed.
    *
-   * Here the window is wide open, so only ::calculateChecksum() removing the
-   * tag again can make the second lookup see the new value.
+   * So the window here is tiny and real time is allowed to pass: only
+   * ::calculateChecksum() keeping the tag out of the static cache can make the
+   * lookup after it see the new value.
    *
    * @covers ::calculateChecksum
    */
-  public function testSpeculativeCountIsNotPinnedForTheProcess(): void {
+  public function testTheWindowBoundsTheConsequenceAndNotOnlyTheUse(): void {
+    $window = 0.05;
     new Settings([
       'redis_rtt_tag_warmset_min_hits' => 2,
-      // Wide open: nothing here may depend on the count ageing out.
-      'redis_rtt_tag_warmset_ttl' => 3600.0,
+      'redis_rtt_tag_warmset_ttl' => $window,
       'cache_prefix' => 'drupal',
     ]);
     $key = 'drupal:cachetags:node:1';
@@ -438,10 +438,54 @@ class PreloadingRedisCacheTagsChecksumTest extends UnitTestCase {
     // Another process invalidates node:1 after that first, speculative answer.
     $this->client->data[$key] = 4;
 
+    // Once the window has passed, the count has to be read again. Without
+    // ::calculateChecksum() removing the tag, core's static cache would answer
+    // 3 here for the rest of the process however long the window was.
+    usleep((int) ($window * 2 * 1000000));
     $this->assertSame(
       4,
       (int) $provider->getCurrentChecksum(['node:1']),
-      'A speculatively answered tag must be re-read next time, not pinned.',
+      'Past its window, a speculatively answered tag must be re-read.',
+    );
+  }
+
+  /**
+   * Inside its window, a speculative count answers again without a round trip.
+   *
+   * This is the other half of the contract, and it is the half that was broken:
+   * the speculative entry used to be discarded on first use, so the second
+   * lookup of the same tag went to Redis whatever the window said - a round
+   * trip per preloaded tag asked more than once, which on a warm content
+   * listing was 61 of them and took the saving there from 49% to 12%.
+   *
+   * A tag asked for repeatedly is the ordinary shape of a warm page: every
+   * cache read validates the same handful of configuration tags.
+   *
+   * @covers ::getTagInvalidationCounts
+   */
+  public function testInsideItsWindowSpeculativeCountIsNotReRead(): void {
+    new Settings([
+      'redis_rtt_tag_warmset_min_hits' => 2,
+      // Wide enough that nothing here can age out mid-test.
+      'redis_rtt_tag_warmset_ttl' => 3600.0,
+      'cache_prefix' => 'drupal',
+    ]);
+    $this->client->data['drupal:cachetags:node:1'] = 3;
+    $this->client->data['drupal:cachetags:node:2'] = 1;
+
+    $provider = $this->provider();
+    $provider->registerCacheTagsForPreload(['node:1']);
+    $provider->getCurrentChecksum(['node:2']);
+
+    $this->client->resetCounters();
+    for ($lookup = 0; $lookup < 5; $lookup++) {
+      $this->assertSame(3, (int) $provider->getCurrentChecksum(['node:1']));
+    }
+
+    $this->assertSame(
+      0,
+      $this->client->roundTrips,
+      'A count already read ahead of time must answer for its whole window, not once.',
     );
   }
 

@@ -264,9 +264,18 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
             // tag cache once this calculation is done.
             $this->answeredSpeculatively[] = $tag;
           }
-          // Used or expired, it has served its purpose: from here on the tag is
-          // one the caller asked for, and core's own static cache owns it.
-          unset($this->speculative[$tag]);
+          else {
+            // Expired, and only then discarded. It used to be dropped on first
+            // use as well, which made ::$speculativeTtl bound nothing: the
+            // second lookup of the same tag always went to Redis, whether the
+            // count was a millisecond old or an hour. That cost one round trip
+            // per preloaded tag asked more than once - 61 of them on a warm
+            // content listing, which took this module's saving there from 49%
+            // to 12%. Letting the entry live out its window instead is what the
+            // setting has always claimed to do: "seconds a preloaded checksum
+            // may answer for its tag".
+            unset($this->speculative[$tag]);
+          }
         }
       }
     }
@@ -385,12 +394,13 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
   /**
    * {@inheritdoc}
    *
-   * A speculative count answers the calculation it was asked for and then goes
-   * away, instead of being left in core's static tag cache.
+   * A speculative count is kept out of core's static tag cache, so that it can
+   * never outlive the window it was granted.
    *
-   * The distinction matters because ::$speculativeTtl does not do what it looks
-   * like it does. It bounds when a count read ahead of time may be *used*; it
-   * does not bound how long the consequence of using it lasts. Core's
+   * The distinction matters because ::$speculativeTtl does not, on its own, do
+   * what it looks like it does. It bounds when a count read ahead of time may
+   * be *used*; it does not bound how long the consequence of using it lasts.
+   * Core's
    * \Drupal\Core\Cache\CacheTagsChecksumTrait::calculateChecksum() folds
    * whatever ::getTagInvalidationCounts() returns into $this->tagCache, and
    * nothing empties that until ::reset() or the end of the process. So a count
@@ -401,22 +411,34 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
    * milliseconds; in a cron run, a queue worker or a migration it is the whole
    * run, and an editor's save elsewhere goes unseen for all of it.
    *
-   * Removing them again afterwards is the smallest change that closes it: the
-   * calculation still gets the speculative value, so the round trip it saved
-   * stays saved, and the next caller to ask for that tag reads it from Redis
-   * rather than inheriting a stale answer. It costs a round trip per tag that
-   * is asked for more than once in a process, which is the price of the
-   * guarantee.
+   * Removing them again afterwards closes that: the calculation still gets the
+   * speculative value, so the round trip it saved stays saved, and once the
+   * window is over the next caller reads the tag from Redis rather than
+   * inheriting a stale answer.
    *
-   * WHAT THIS DOES NOT CLOSE
+   * WHAT THIS COSTS, AND WHAT IT DOES NOT
    *
-   * Within the window, the count served is still the one read before another
-   * process invalidated the tag, so a single calculation can still validate an
-   * entry that is already stale. Closing that too means not answering from
-   * ::$speculative at all - measured at 18 of the 30 round trips this module
-   * saves on a warm edit form - and is a design decision, not a bug fix. Set
-   * $settings['redis_rtt_tag_warmset_ttl'] = 0 to take it, which turns every
-   * speculative count into a re-read.
+   * The entry stays in ::$speculative until its window expires, so a tag asked
+   * for repeatedly inside that window keeps being answered without a round
+   * trip. That is deliberate, and it is a correction: this method used to be
+   * paired with dropping the speculative entry on first use, which made the TTL
+   * bound nothing and cost a round trip per preloaded tag asked more than once.
+   * Measured, that was 85 round trips against 146 on a warm content listing and
+   * 31 against 42 on a warm edit form - most of what this module saves on a
+   * warm page, spent to be stricter than the setting ever promised.
+   *
+   * What is not closed is the window itself. Inside it the count served is the
+   * one read before another process invalidated the tag, so a calculation can
+   * validate an entry that is already stale, and an entry written during it is
+   * stamped with a count that is already superseded - which makes it a
+   * permanent miss rather than wrong content, since the counters only rise. The
+   * stock backend does neither, because it never holds a count for a tag nobody
+   * asked for. The bound is ::$speculativeTtl and nothing else, so it is a real
+   * exposure of that many seconds, one second by default.
+   *
+   * Set $settings['redis_rtt_tag_warmset_ttl'] = 0 to remove the exposure
+   * entirely, which turns every speculative count into a re-read; measured at
+   * 18 of the 30 round trips this module saves on a warm edit form.
    *
    * @param string[] $tags
    *   The tags to checksum.
