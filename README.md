@@ -344,24 +344,41 @@ revert; the next save from the edit form then wrote the stale values back into
 the database. That version was removed rather than defaulted off.
 
 What is batched now is only the bins where a revived entry is harmless, which
-takes all three of:
+takes all four of:
 
 1. **Nothing deletes their keys one at a time.** Drupal 10.6 core has no caller
    of `VariationCache::delete()`, and `RenderCache` exposes no delete method at
    all. `MONITOR` over a node save, an edit through the form, three tag
    invalidations and a full cron recorded zero `DEL`/`UNLINK`/`HDEL` against the
    render bin, out of 15,806 commands.
-2. **They are invalidated through cache tags.** A revived entry carries the tag
-   counter from before the invalidation, so it is discarded on read. Verified
-   end to end: a node's four render entries were dumped, the node was edited,
-   the entries were restored byte for byte, and the page kept serving the new
-   title.
+2. **Most of what they hold is invalidated through cache tags.** A revived
+   entry carries the tag counter from before the invalidation, so it is
+   discarded on read. Verified end to end: a node's four render entries were
+   dumped, the node was edited, the entries were restored byte for byte, and the
+   page kept serving the new title.
+
+   Not all of it, and this used to say otherwise. `VariationCache::set()` writes
+   its `CacheRedirect` pointers permanent and untagged on purpose, and they are
+   100% of the permanent untagged entries in these bins: measured, 215 of 459
+   render entries on a cold site, 64 of 130 in `dynamic_page_cache`, 0 of 82 in
+   `menu`. No tag counter can age one of those out. What keeps them right is the
+   first condition plus the creation-stamp guard on every batched write, not
+   this one.
 3. **They are not chained-fast bins**, so there is no "last write" marker that
    has to reach Redis behind the data it announces.
-4. **Nothing reads one of their keys to decide whether to correct it.** Not the
-   same as the first condition: the danger there is a delete the flush undoes,
-   here it is a *read* that misses a queued write and draws a conclusion from
-   its absence.
+4. **Anything that reads one of their keys to decide what to write reads it
+   through this backend.** Not the same as the first condition: the danger there
+   is a delete the flush undoes, here it is a *read* that misses a queued write
+   and draws a conclusion from its absence.
+
+   This used to claim that nothing read them at all, which is false: core's
+   `VariationCache::set()` reads the redirect chain before deciding what to
+   write, and `CacheCollector::updateCache()` reads its own entry - on
+   `cache.menu`, through the menu active trail. Both read through this backend,
+   so the queue answers them and a process never misses its own write, and the
+   creation-stamp guard orders writes from different processes. That is what
+   `cache.data` could not offer: the read that mattered there was in a *later*
+   request, which no queue can answer.
 
 `cache.entity`, `cache.default` and the chained-fast bins each fail one of
 those and write immediately. They lose almost nothing by it: `cache.entity`
@@ -597,10 +614,20 @@ from separate sittings compares the weather rather than the code.
 | content listing, cold | 1429 ms | 1213 ms | **994 ms** (-18%) |
 | view a node, cold | 7263 ms | 7089 ms | **6794 ms** (-4%) |
 | edit form, cold | 2999 ms | 2951 ms | **2876 ms** (-3%) |
-| warm pages | — | — | no measurable change |
+| content listing, warm | 359 ms | — | **230 ms** (-36%) |
+| view a node, warm | — | — | no measurable change |
 
 The saving in time tracks the saving in waits, which is the point: 245 fewer
-waits at 1 ms each is about 295 ms off the cold node view.
+waits at 1 ms each is about 295 ms off the cold node view, and 82 fewer is about
+129 ms off the warm listing - measured at 359 ms against 230 ms, medians of
+three runs alternating which configuration went first.
+
+That last row used to read "warm pages: no measurable change", which was wrong
+and understated this module by a third. A warm page writes nothing, so batching
+has nothing to do there - but reading is a different matter, and the round trip
+table above says so plainly: a warm content listing goes from 166 waits to 86. A
+warm node view really is unchanged, because it only spends 24 waits to begin
+with.
 
 It is also worth reading the first row against the second. The listing gains
 18%; the node view gains 4% for a larger absolute saving, because that page
