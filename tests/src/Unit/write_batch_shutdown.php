@@ -19,15 +19,10 @@ namespace Drupal\redis_rtt\Redis;
 // Shutdown callbacks registered so far, in order.
 $GLOBALS['redis_rtt_test_shutdown'] = [];
 
-/**
- * Which of the two was used for each registration, in order.
- *
- * The distinction is the whole point of one of the tests: registering with
- * Drupal is right until its dispatcher has finished walking its own list, and
- * wrong afterwards, because nobody reads that list again.
- *
- * @var string[]
- */
+// Which of the two was used for each registration, in order. The distinction is
+// the whole point of one of the tests: registering with Drupal is right until
+// its dispatcher has finished walking its own list, and wrong afterwards,
+// because nobody reads that list again.
 $GLOBALS['redis_rtt_test_shutdown_via'] = [];
 
 /**
