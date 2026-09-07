@@ -20,6 +20,17 @@ namespace Drupal\redis_rtt\Redis;
 $GLOBALS['redis_rtt_test_shutdown'] = [];
 
 /**
+ * Which of the two was used for each registration, in order.
+ *
+ * The distinction is the whole point of one of the tests: registering with
+ * Drupal is right until its dispatcher has finished walking its own list, and
+ * wrong afterwards, because nobody reads that list again.
+ *
+ * @var string[]
+ */
+$GLOBALS['redis_rtt_test_shutdown_via'] = [];
+
+/**
  * Stands in for the Drupal dispatcher.
  *
  * @param callable $callback
@@ -27,6 +38,7 @@ $GLOBALS['redis_rtt_test_shutdown'] = [];
  */
 function drupal_register_shutdown_function(callable $callback): void {
   $GLOBALS['redis_rtt_test_shutdown'][] = $callback;
+  $GLOBALS['redis_rtt_test_shutdown_via'][] = 'drupal';
 }
 
 /**
@@ -37,4 +49,5 @@ function drupal_register_shutdown_function(callable $callback): void {
  */
 function register_shutdown_function(callable $callback): void {
   $GLOBALS['redis_rtt_test_shutdown'][] = $callback;
+  $GLOBALS['redis_rtt_test_shutdown_via'][] = 'php';
 }

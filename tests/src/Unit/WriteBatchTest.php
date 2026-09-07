@@ -48,6 +48,7 @@ class WriteBatchTest extends UnitTestCase {
     parent::setUp();
     $this->client = new FakeRedisClient();
     $GLOBALS['redis_rtt_test_shutdown'] = [];
+    $GLOBALS['redis_rtt_test_shutdown_via'] = [];
 
     $time = $this->createMock(TimeInterface::class);
     $time->method('getRequestTime')->willReturn(1000000);
@@ -606,6 +607,38 @@ class WriteBatchTest extends UnitTestCase {
 
     $this->assertArrayHasKey('p:render:temprano', $this->client->data);
     $this->assertArrayHasKey('p:render:tardio', $this->client->data, 'A write made during shutdown must not die with the process.');
+  }
+
+
+  /**
+   * Once the request has ended, registration goes to PHP and not to Drupal.
+   *
+   * Drupal's dispatcher is one entry in PHP's own list, and it walks a list of
+   * its own. Appending to that list is right while the walk is happening and
+   * useless once it is over - and a shutdown function registered with PHP
+   * *after* Drupal's runs exactly then. Handing the registration to PHP
+   * instead reaches it, because PHP is still walking.
+   *
+   * Verified end to end as well: a native shutdown function registered after
+   * Drupal's writes to cache, and that write is lost without this and lands
+   * with it.
+   *
+   * @covers ::sendOnShutdown
+   */
+  public function testAfterShutdownTheRegistrationGoesStraightToPhp(): void {
+    $batch = $this->batch();
+    $backend = $this->backend('render', $batch);
+
+    $backend->set('durante', 'value');
+    $this->assertSame(['drupal'], $GLOBALS['redis_rtt_test_shutdown_via'], 'While the request is running, Drupal owns the ordering.');
+
+    $this->runShutdown();
+
+    $backend->set('despues', 'value');
+    $this->assertSame(['drupal', 'php'], $GLOBALS['redis_rtt_test_shutdown_via'], 'Once the walk is over, only PHP still reaches a new callback.');
+
+    $this->runShutdown();
+    $this->assertArrayHasKey('p:render:despues', $this->client->data);
   }
 
   /**

@@ -74,11 +74,12 @@ use Drupal\redis\ClientInterface;
  *
  * Neither is a cache write issued from a destructor that runs after the last
  * shutdown function. ::sendOnShutdown() re-arms itself, which covers anything
- * written from another shutdown function, but PHP will not run a function
- * registered from that late in teardown. Core writes nothing there - what it
- * writes late (MenuActiveTrail, AliasManager, LibraryDiscoveryCollector) goes
- * out through DestructableInterface::destruct() during kernel.terminate, well
- * before shutdown, and is batched normally.
+ * written from another shutdown function - Drupal's or PHP's, before or after
+ * its own - but PHP will not run a function registered from that late in
+ * teardown. Core writes nothing there: what it writes late (MenuActiveTrail,
+ * AliasManager, LibraryDiscoveryCollector) goes out through
+ * DestructableInterface::destruct() during kernel.terminate, well before
+ * shutdown, and is batched normally.
  */
 class WriteBatch {
 
@@ -139,6 +140,11 @@ LUA;
    * Whether the end-of-request send has been registered.
    */
   protected bool $shutdownRegistered = FALSE;
+
+  /**
+   * Whether the end-of-request send has already run once.
+   */
+  protected bool $shutdownRan = FALSE;
 
   /**
    * Guards against a send nesting inside another one.
@@ -460,6 +466,7 @@ LUA;
    */
   public function sendOnShutdown(): void {
     $this->sendQuietly();
+    $this->shutdownRan = TRUE;
     $this->shutdownRegistered = FALSE;
   }
 
@@ -471,7 +478,15 @@ LUA;
       return;
     }
     $this->shutdownRegistered = TRUE;
-    if (function_exists('drupal_register_shutdown_function')) {
+
+    // Drupal's dispatcher is itself one entry in PHP's list, and it walks a
+    // list of its own. Registering there is right up until that walk finishes;
+    // after it, appending to a list nobody is reading again means the write is
+    // never sent. PHP is still walking its own list at that point, so anything
+    // handed to it directly is still reached - which is what a shutdown
+    // function registered with register_shutdown_function() *after* Drupal's
+    // needs, because it runs once Drupal's walk is over.
+    if (!$this->shutdownRan && function_exists('drupal_register_shutdown_function')) {
       drupal_register_shutdown_function([$this, 'sendOnShutdown']);
     }
     else {
