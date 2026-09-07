@@ -189,6 +189,15 @@ class FastPhpRedisFactory extends PhpRedisFactory {
     $redis->setOption(\Redis::OPT_SERIALIZER, \Redis::SERIALIZER_NONE);
     // Detect a half-open connection - the common outcome of an AZ failover -
     // instead of blocking the worker until the FPM timeout.
+    //
+    // Redundant on phpredis 6.3.0, and knowingly kept: every ::connect() and
+    // ::pconnect() branch above already carries $read_timeout, and measured
+    // here a pconnect() that reuses a pooled socket reapplies it too (a socket
+    // opened with 5.0 reports 0.25 after a second pconnect asking for 0.25).
+    // Removing this line therefore changes nothing observable, which is why no
+    // test asserts on it - a test that appeared to would in fact be asserting
+    // on what ::connect() did. It stays as a safeguard for builds where the
+    // connect parameter is ignored, not as behaviour anything depends on.
     $redis->setOption(\Redis::OPT_READ_TIMEOUT, $read_timeout);
     if (defined('Redis::OPT_TCP_KEEPALIVE')) {
       $redis->setOption(\Redis::OPT_TCP_KEEPALIVE, 1);
@@ -202,15 +211,27 @@ class FastPhpRedisFactory extends PhpRedisFactory {
    *
    * A non-positive setting means "no limit", which is what phpredis documents
    * and what an operator writing 0 is asking for. It cannot be passed on as
-   * written, though: measured on phpredis 6.3.0, leaving read_timeout out of
-   * ::connect() entirely works and reports back 0.0, while passing 0.0
-   * explicitly makes the first read fail with "socket error on read socket" -
-   * the same value, a different code path. Since this class always passes the
-   * parameter, a site that set 0 got a RedisException on every request and an
-   * HTTP 500 on every page, where the stock factory - which never passes the
-   * key at all - serves the site normally. A negative value reaches the
-   * unlimited behaviour reliably, so that is what a non-positive setting is
-   * normalised to.
+   * written, though, and the reason is not where this used to say it was.
+   *
+   * Measured on phpredis 6.3.0, against a real server, in four combinations:
+   * connect() with 0.0 and no setOption() works and reports back 0.0;
+   * connect() with the parameter omitted and setOption(OPT_READ_TIMEOUT, 0.0)
+   * afterwards fails the next read with "socket error on read socket"; so does
+   * passing 0.0 to both; and omitting both works. In other words the connect
+   * parameter accepts zero perfectly well and ::setOption() is what rejects it.
+   * This class calls both, so a site that set 0 got a RedisException on every
+   * request and an HTTP 500 on every page, where the stock factory - which
+   * calls neither - serves the site normally.
+   *
+   * Saying which of the two breaks matters, because the obvious "fix" suggested
+   * by blaming connect() is to stop passing the parameter, and that still
+   * leaves the setOption() call and still takes the site down. A negative value
+   * is accepted by both and reaches the unlimited behaviour reliably, so that
+   * is what a non-positive setting is normalised to.
+   *
+   * \Drupal\Tests\redis_rtt\Kernel\FastPhpRedisConnectionTest asserts this
+   * against a real socket; nothing in tests/src/Unit can, because the double
+   * there replaces ::connect() wholesale.
    *
    * Honouring it rather than refusing it is deliberate. An unbounded read is
    * the failure mode this class exists to avoid, and choosing it throws that
