@@ -443,9 +443,8 @@ class WriteBatchTest extends UnitTestCase {
     $this->assertSame(0, $batch->getStats()['writes'], 'None of those writes should have been queued.');
   }
 
-
   /**
-   * cache.data is not batched, and that is a decision rather than an oversight.
+   * Cache.data is not batched, and that is a decision rather than an oversight.
    *
    * It was on the list until a review found the pattern the three conditions
    * miss. The contributed redirect module keeps redirect_prefix_list:<prefix>
@@ -542,7 +541,6 @@ class WriteBatchTest extends UnitTestCase {
     $this->assertCount(3, $this->client->data);
   }
 
-
   /**
    * Runs the shutdown callbacks the batch registered, as the process would.
    *
@@ -609,7 +607,6 @@ class WriteBatchTest extends UnitTestCase {
     $this->assertArrayHasKey('p:render:tardio', $this->client->data, 'A write made during shutdown must not die with the process.');
   }
 
-
   /**
    * Once the request has ended, registration goes to PHP and not to Drupal.
    *
@@ -649,7 +646,7 @@ class WriteBatchTest extends UnitTestCase {
    *
    * @covers ::sendOnShutdown
    */
-  public function testAFullBatchDoesNotRegisterASecondCallback(): void {
+  public function testFullBatchDoesNotRegisterSecondCallback(): void {
     $batch = $this->batch(['redis_rtt_max_batched_writes' => 2]);
     $backend = $this->backend('render', $batch);
 
@@ -677,7 +674,6 @@ class WriteBatchTest extends UnitTestCase {
     $this->assertSame(31536000, $this->client->ttls['p:render:permanente'], 'A permanent entry gets the backend default, not "no expiry".');
   }
 
-
   /**
    * A pipeline that fails takes its connection out of service.
    *
@@ -694,7 +690,7 @@ class WriteBatchTest extends UnitTestCase {
    * @covers ::send
    * @covers ::discard
    */
-  public function testAFailedPipelineClosesItsConnection(): void {
+  public function testFailedPipelineClosesItsConnection(): void {
     $client = new FailingPipelineClient();
     $factory = $this->createMock(ClientFactory::class);
     $factory->method('getClient')->willReturn($client);
@@ -795,7 +791,7 @@ class WriteBatchTest extends UnitTestCase {
    *
    * @covers ::add
    */
-  public function testAFullBatchThatFailsRaises(): void {
+  public function testFullBatchThatFailsRaises(): void {
     $batch = $this->brokenBatch(['redis_rtt_max_batched_writes' => 2]);
     $backend = $this->backendFor($batch);
 

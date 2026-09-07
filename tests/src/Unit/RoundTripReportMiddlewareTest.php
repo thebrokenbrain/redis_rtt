@@ -87,7 +87,7 @@ class RoundTripReportMiddlewareTest extends UnitTestCase {
    *
    * @covers ::handle
    */
-  public function testAFailedBatchDoesNotBreakTheResponse(): void {
+  public function testFailedBatchDoesNotBreakTheResponse(): void {
     new Settings(['redis_rtt_report' => TRUE]);
 
     $factory = $this->createMock(ClientFactory::class);
