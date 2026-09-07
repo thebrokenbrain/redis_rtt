@@ -829,6 +829,9 @@ class WriteBatchTest extends UnitTestCase {
   /**
    * Builds a batch whose client always fails.
    *
+   * @param array<string, mixed> $settings
+   *   Settings overriding the defaults.
+   *
    * @return \Drupal\redis_rtt\Redis\WriteBatch
    *   The batch.
    */
