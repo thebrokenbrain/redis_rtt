@@ -152,6 +152,36 @@ class BatchingRedisBackendTest extends UnitTestCase {
   }
 
   /**
+   * Invalidating an entry that is not there must not create one.
+   *
+   * The invalidation script guards its HSET on the entry already existing and
+   * still being valid. Without that guard the HSET creates the hash it was
+   * pointed at - permanent, never expiring, holding nothing but valid=0 - and
+   * since cache tag invalidation walks whatever cache IDs it is handed, a bin
+   * would accumulate one such key per miss, for ever.
+   *
+   * This asserts on the guard rather than on the round trip, because the round
+   * trip is the same either way. The stand-in reads the guard out of the script
+   * text, so deleting it from ::INVALIDATE_LUA fails this test instead of
+   * quietly passing against a fake that kept the behaviour on its own account.
+   *
+   * @covers ::invalidateMultiple
+   */
+  public function testInvalidatingMissingEntriesCreatesNothing(): void {
+    $backend = $this->backend();
+    $backend->set('presente', 'v');
+    $before = array_keys($this->client->data);
+
+    $backend->invalidateMultiple(['ausente-1', 'ausente-2']);
+
+    $this->assertSame(
+      $before,
+      array_keys($this->client->data),
+      'Invalidating a missing cache ID must not add a key to the bin.',
+    );
+  }
+
+  /**
    * Invalidating nothing touches the network at all.
    *
    * @covers ::invalidateMultiple

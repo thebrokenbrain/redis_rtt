@@ -247,8 +247,8 @@ final class FakeRedisClient implements ClientInterface {
       return 1;
     }
 
-    // Cache entry invalidation. Like the branch above, the deciding line is read
-    // out of the script rather than reimplemented here: a stand-in that
+    // Cache entry invalidation. Like the branch above, the deciding line is
+    // read out of the script rather than reimplemented here: a stand-in that
     // invalidates on its own account passes whatever the real script does, and
     // a test asserting on invalidation would then survive the script losing it.
     if (str_contains($script, "'valid'")) {
@@ -256,12 +256,22 @@ final class FakeRedisClient implements ClientInterface {
       if (!str_contains($script, "redis.call('HSET', KEYS[1], 'valid', 0)")) {
         return 0;
       }
-      $valid = $this->data[$key]['valid'] ?? FALSE;
-      if ($valid && $valid !== '0' && $valid !== '') {
-        $this->data[$key]['valid'] = '0';
-        return 1;
+      // The guard is read out of the script, exactly as the branch above reads
+      // its own. It used to be reimplemented here instead, and the difference
+      // is not academic: with the guard applied on this class' own account,
+      // deleting it from the real script left the whole suite green, and an
+      // HSET with no guard turns "invalidate an entry that is not there" into
+      // "create a permanent, never-expiring key".
+      $guarded = str_contains($script, "if v and v ~= '0' and v ~= '' then");
+      // Cast first, so the two comparisons below are the Lua guard's two
+      // comparisons and not PHP's falsy rules standing in for them.
+      $valid = (string) ($this->data[$key]['valid'] ?? '');
+      if ($guarded && ($valid === '' || $valid === '0')) {
+        return 0;
       }
-      return 0;
+      // Unguarded, HSET creates the hash it was pointed at, missing or not.
+      $this->data[$key]['valid'] = '0';
+      return 1;
     }
 
     // Lock release.
