@@ -402,4 +402,47 @@ class PreloadingRedisCacheTagsChecksumTest extends UnitTestCase {
     );
   }
 
+  /**
+   * A speculative count answers once and is not pinned for the process.
+   *
+   * The freshness window bounds when a count read ahead of time may be used; on
+   * its own it does nothing about how long the consequence lasts, because core
+   * folds whatever ::getTagInvalidationCounts() returns into its static tag
+   * cache and nothing empties that until the process ends. A count that was one
+   * millisecond young when it was consulted would otherwise stay authoritative
+   * for a whole cron run - which is the failure the window was added to
+   * prevent, narrowed but not removed.
+   *
+   * Here the window is wide open, so only ::calculateChecksum() removing the
+   * tag again can make the second lookup see the new value.
+   *
+   * @covers ::calculateChecksum
+   */
+  public function testSpeculativeCountIsNotPinnedForTheProcess(): void {
+    new Settings([
+      'redis_rtt_tag_warmset_min_hits' => 2,
+      // Wide open: nothing here may depend on the count ageing out.
+      'redis_rtt_tag_warmset_ttl' => 3600.0,
+      'cache_prefix' => 'drupal',
+    ]);
+    $key = 'drupal:cachetags:node:1';
+    $this->client->data[$key] = 3;
+    $this->client->data['drupal:cachetags:node:2'] = 1;
+
+    $provider = $this->provider();
+    // node:1 is fetched speculatively while looking up node:2, then asked for.
+    $provider->registerCacheTagsForPreload(['node:1']);
+    $provider->getCurrentChecksum(['node:2']);
+    $this->assertSame(3, (int) $provider->getCurrentChecksum(['node:1']));
+
+    // Another process invalidates node:1 after that first, speculative answer.
+    $this->client->data[$key] = 4;
+
+    $this->assertSame(
+      4,
+      (int) $provider->getCurrentChecksum(['node:1']),
+      'A speculatively answered tag must be re-read next time, not pinned.',
+    );
+  }
+
 }

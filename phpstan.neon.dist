@@ -26,3 +26,11 @@ parameters:
         -
             identifier: method.impossibleType
             path: tests/src/Kernel/LuaRedisLockTest.php
+        # ::calculateChecksum() empties $answeredSpeculatively, calls the parent,
+        # and reads it back: the parent is what fills it, through
+        # ::getTagInvalidationCounts(). The analyser does not follow a callback
+        # into an overridden method, so it concludes the array is still the empty
+        # one it was assigned two lines earlier.
+        -
+            identifier: foreach.emptyArray
+            path: src/Cache/PreloadingRedisCacheTagsChecksum.php

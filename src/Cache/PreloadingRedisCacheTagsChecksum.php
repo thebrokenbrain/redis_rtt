@@ -105,6 +105,16 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
   protected array $speculative = [];
 
   /**
+   * Tags the current checksum calculation answered from ::$speculative.
+   *
+   * Emptied and refilled around every ::calculateChecksum(), which removes them
+   * from the static tag cache afterwards. See that method for why.
+   *
+   * @var array<int, string>
+   */
+  protected array $answeredSpeculatively = [];
+
+  /**
    * How long a speculatively fetched count may answer for its tag, in seconds.
    *
    * Sized for a web request, which is the case the batching exists for. A
@@ -250,6 +260,9 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
         if (isset($this->speculative[$tag])) {
           if ($this->speculative[$tag]['at'] >= $cutoff) {
             $fresh[$tag] = $this->speculative[$tag]['count'];
+            // Recorded so ::calculateChecksum() can keep it out of the static
+            // tag cache once this calculation is done.
+            $this->answeredSpeculatively[] = $tag;
           }
           // Used or expired, it has served its purpose: from here on the tag is
           // one the caller asked for, and core's own static cache owns it.
@@ -371,11 +384,70 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
 
   /**
    * {@inheritdoc}
+   *
+   * A speculative count answers the calculation it was asked for and then goes
+   * away, instead of being left in core's static tag cache.
+   *
+   * The distinction matters because ::$speculativeTtl does not do what it looks
+   * like it does. It bounds when a count read ahead of time may be *used*; it
+   * does not bound how long the consequence of using it lasts. Core's
+   * \Drupal\Core\Cache\CacheTagsChecksumTrait::calculateChecksum() folds
+   * whatever ::getTagInvalidationCounts() returns into $this->tagCache, and
+   * nothing empties that until ::reset() or the end of the process. So a count
+   * that was one millisecond too young at the moment it was consulted became
+   * authoritative for the rest of the run - which is exactly the failure the
+   * TTL was introduced to prevent, with its trigger narrowed from "always" to
+   * "a one-second window" but not removed. In a web request that is
+   * milliseconds; in a cron run, a queue worker or a migration it is the whole
+   * run, and an editor's save elsewhere goes unseen for all of it.
+   *
+   * Removing them again afterwards is the smallest change that closes it: the
+   * calculation still gets the speculative value, so the round trip it saved
+   * stays saved, and the next caller to ask for that tag reads it from Redis
+   * rather than inheriting a stale answer. It costs a round trip per tag that
+   * is asked for more than once in a process, which is the price of the
+   * guarantee.
+   *
+   * WHAT THIS DOES NOT CLOSE
+   *
+   * Within the window, the count served is still the one read before another
+   * process invalidated the tag, so a single calculation can still validate an
+   * entry that is already stale. Closing that too means not answering from
+   * ::$speculative at all - measured at 18 of the 30 round trips this module
+   * saves on a warm edit form - and is a design decision, not a bug fix. Set
+   * $settings['redis_rtt_tag_warmset_ttl'] = 0 to take it, which turns every
+   * speculative count into a re-read.
+   *
+   * @param string[] $tags
+   *   The tags to checksum.
+   *
+   * @return int
+   *   The checksum.
+   */
+  protected function calculateChecksum(array $tags) {
+    $this->answeredSpeculatively = [];
+    $checksum = parent::calculateChecksum($tags);
+
+    // Taken into a local and cleared in one step: the property is filled from
+    // inside the parent call, by ::getTagInvalidationCounts(), and a checksum
+    // calculation can nest when a cache read happens during one.
+    $answered = $this->answeredSpeculatively;
+    $this->answeredSpeculatively = [];
+    foreach ($answered as $tag) {
+      unset($this->tagCache[$tag]);
+    }
+
+    return $checksum;
+  }
+
+  /**
+   * {@inheritdoc}
    */
   public function reset(): void {
     parent::reset();
     $this->preloadTags = [];
     $this->speculative = [];
+    $this->answeredSpeculatively = [];
     $this->warmSetUsed = FALSE;
   }
 
