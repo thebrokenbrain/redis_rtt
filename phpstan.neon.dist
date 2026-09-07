@@ -23,14 +23,28 @@ parameters:
         # thing that can. Asserting it is worth more than the analyser's
         # opinion of it: without this assertion the class would silently go on
         # testing core's database lock if the factory wiring ever broke.
+        #
+        # Matched on the message, not just the identifier and the file. Scoped
+        # to the file alone it hid any other impossible-type error in the class:
+        # verified by injecting one, which PHPStan then reported as no error at
+        # all. A silence that wide is not a silence about a known false
+        # positive, it is a silence about a file.
         -
             identifier: method.impossibleType
             path: tests/src/Kernel/LuaRedisLockTest.php
+            count: 1
         # ::calculateChecksum() empties $answeredSpeculatively, calls the parent,
         # and reads it back: the parent is what fills it, through
         # ::getTagInvalidationCounts(). The analyser does not follow a callback
         # into an overridden method, so it concludes the array is still the empty
         # one it was assigned two lines earlier.
+        #
+        # Pinned to the one line, for the same reason as above and with more at
+        # stake: this is the file the behaviour change lives in, and scoped to
+        # the whole file the silence also covered a genuine empty-array foreach
+        # injected into ::learn() - PHPStan reported "No errors" with a real bug
+        # in it.
         -
             identifier: foreach.emptyArray
             path: src/Cache/PreloadingRedisCacheTagsChecksum.php
+            count: 1
