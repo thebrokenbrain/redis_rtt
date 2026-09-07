@@ -62,13 +62,27 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
    *   every round trip they cost, which is exactly the number this header
    *   exists to state.
    *
-   *   Almost, and not all: the header has to be set on a response that is about
-   *   to be returned, so it is written before kernel.terminate. Anything a
-   *   needs_destruction service writes there - in practice one entry, the menu
-   *   active trail - is batched after this ran and shows up in neither count.
-   *   Measured on a cold page: the header said 59 writes in 1 batch where the
-   *   wire saw 60 in 2. Treat the header as a floor for a page that ends in a
-   *   destruct, and MONITOR as the arbiter.
+   *   Almost, and not all - and the gap is bigger and differently caused than
+   *   this used to say. The header has to be set on a response that is about to
+   *   be returned, so it is written before the response is sent and before
+   *   kernel.terminate. Everything the request does with Redis after that point
+   *   is missing from every field, not just from the batch counters.
+   *
+   *   Measured on a warm authenticated node view: the header reported 24 round
+   *   trips against stock and 16 against this module, where the wire saw 35 and
+   *   26. That is 11 and 10 hidden, and only ONE of them falls after the
+   *   response - the other ten are BigPipe placeholders being rendered inside
+   *   Response::send(), all of them reads. The one write from a
+   *   needs_destruction service that this used to name as the whole of the gap
+   *   is a tenth of it.
+   *
+   *   The consequence worth knowing is not the absolute numbers but what they do
+   *   to a percentage: the hidden block is nearly constant and both
+   *   configurations pay it, so subtracting it from numerator and denominator
+   *   inflates the saving. That warm view reads as -33.3% from the header and is
+   *   -25.7% on the wire. Cold pages barely move (-45.6% against -45.2%), and in
+   *   at least one scenario the bias runs the other way. Treat the header as a
+   *   floor, quote wire figures for percentages, and let MONITOR arbitrate.
    */
   public function __construct(
     protected HttpKernelInterface $httpKernel,

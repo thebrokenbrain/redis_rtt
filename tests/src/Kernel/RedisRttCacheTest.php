@@ -85,9 +85,14 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
     // prefix (test46520047:page:...). Setting cache_prefix here looked like it
     // provided that and did not: the redis module derives the prefix and never
     // reads this. A dead line crediting the wrong mechanism is worse than none.
+    // The module's own defaults, plus whatever the subclass adds. Spelling the
+    // defaults out here means they have to be kept in step with WriteBatch, and
+    // they had already fallen out of step: this list carried 'data' long after
+    // it was taken off the batched list for safety, so every inherited
+    // assertion ran against a bin list the module does not ship.
     if ($this->extraBatchedBins) {
       $settings['redis_rtt_batched_bins'] = array_merge(
-        ['render', 'data', 'menu', 'dynamic_page_cache'],
+        ['render', 'menu', 'dynamic_page_cache'],
         $this->extraBatchedBins,
       );
     }
@@ -215,7 +220,6 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
     $this->assertNotEmpty($backend->get('sin_etiqueta'), 'Its neighbour is untouched.');
   }
 
-
   /**
    * A bin flushed by another process stops serving entries written before it.
    *
@@ -229,7 +233,7 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
    * So the flush is issued the way another process would issue it: straight
    * into Redis, against a backend that has not resolved its marker yet.
    */
-  public function testAFlushByAnotherProcessIsHonoured(): void {
+  public function testFlushByAnotherProcessIsHonoured(): void {
     // A bin nothing else has touched, so this backend starts with its marker
     // unresolved, exactly as a fresh request would.
     $backend = $this->backendFor('marcador');

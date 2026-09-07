@@ -526,12 +526,34 @@ batching does nothing on a page that writes nothing.
 | edit form, warm | 61 | 32 | **32** |
 | content listing, warm | 166 | 86 | **86** |
 
-Commands, over the same seven scenarios, move very little: 10,437 to 10,065 on
-the cold node view, 3,166 to 3,149 on the warm edit form, 221 to 202 on the warm
-listing. Always slightly fewer, never more - most of what this module does
-*replaces* commands rather than adding them, an `EVAL` standing in for
-`HMSET` + `EXPIRE`, an `MGET` for thirty `GET`s. That is the point of the two
-columns being different numbers: the work is the same, the waiting is not.
+Commands are a different story, and the honest version of it is worse than this
+section used to claim.
+
+The `redis-cmds` field of the report header counts *calls this module makes to
+the client*, which is what its docblock says it counts. It is not what Redis
+executes. An `EVAL` counts as one call however much its script does, and the
+script behind a batched write does `HGET` + `HMSET` + `EXPIRE`. So the `EVAL`
+does not stand in for `HMSET` + `EXPIRE`: it **calls** them, and adds a guard
+`HGET` on top.
+
+Measured at the server with `CONFIG RESETSTAT` + `INFO commandstats`, and
+cross-checked against `MONITOR`, the cold scenarios execute **more** commands
+with this module, not fewer:
+
+| scenario, authenticated | stock, at the server | module, at the server |
+|---|---|---|
+| view a node, cold | 10,507 | 10,855 (+3.3%) |
+| content listing, cold | 979 | 1,162 (+18.7%) |
+| edit form, cold | 9,880 | 9,909 (+0.3%) |
+| view a node, warm | 36 | 34 (-5.6%) |
+| edit form, warm | 3,182 | 3,161 (-0.7%) |
+| content listing, warm | 231 | 228 (-1.3%) |
+
+So the trade this module makes is not "the same work, less waiting". It is
+**more commands for Redis, far fewer waits for PHP** - which is the right trade
+when a round trip costs a millisecond and a command costs microseconds, and the
+wrong one if Redis is your bottleneck rather than the network. Say it that way
+round; the wall time table below is where the benefit actually shows up.
 
 Batching accounts for the whole difference between the last two columns, and
 only on cold pages: a warm page writes nothing, so there is nothing to batch.

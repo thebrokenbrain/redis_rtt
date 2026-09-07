@@ -34,20 +34,47 @@ use Drupal\redis\ClientInterface;
  *   method at all, and MONITOR over a node save, an edit, three tag
  *   invalidations and a full cron recorded zero DEL/UNLINK/HDEL against the
  *   render bin out of 15,806 commands.
- * - They are invalidated through cache tags, and a resurrected entry carries
- *   the tag counter from before the invalidation, so it is discarded on read.
- *   Verified end to end: the four render entries of a node were dumped, the
- *   node was edited, the entries were restored byte for byte, and the page kept
- *   serving the new title.
- * - None of them is a chained-fast bin, so there is no "last write" marker that
- *   has to reach Redis behind the data it announces.
- * - Nothing reads one of their keys to decide whether to correct it. This is
- *   the condition cache.data failed, and it is not the same as the first: the
- *   danger is not a delete the flush undoes but a *read* that misses a write
- *   still in the queue and concludes from its absence. See below.
+ * - Most of what they hold is invalidated through cache tags, and a resurrected
+ *   entry carries the tag counter from before the invalidation, so it is
+ *   discarded on read. Verified end to end: the four render entries of a node
+ *   were dumped, the node was edited, the entries were restored byte for byte,
+ *   and the page kept serving the new title.
  *
- * cache.data was on this list until a review found what the fourth condition is
- * for. The contributed redirect module keeps redirect_prefix_list:<prefix> there
+ *   NOT ALL OF IT, and this used to say otherwise. VariationCache::set() writes
+ *   its CacheRedirect pointers permanent and untagged on purpose - "stored
+ *   indefinitely and without tags as they never need to be cleared" - and they
+ *   are 100% of the permanent untagged entries in these bins: measured, 215 of
+ *   459 render entries on a cold site, 64 of 130 in dynamic_page_cache, 0 of 82
+ *   in menu. No tag counter can age one of those out. What keeps them right is
+ *   the first condition plus ::WRITE_IF_NOT_NEWER, not this one.
+ * - None of them is a chained-fast bin, so there is no "last write" marker that
+ *   has to reach Redis behind the data it announces. The chained-fast bins are
+ *   bootstrap, config and discovery, and ::handles() returns FALSE for all three.
+ * - Something DOES read one of their keys to decide what to write, and this
+ *   entry used to claim the opposite. VariationCache::set() begins by reading
+ *   the redirect chain and decides from it whether to write a new redirect or
+ *   overwrite one that is too specific; CacheCollector::updateCache() reads its
+ *   own entry, and its 'created', to choose between merging, deleting and
+ *   backing off - on cache.menu, through menu.active_trail.
+ *
+ *   What makes that survivable here, and did not make it survivable in
+ *   cache.data, is that both of those readers read through this backend:
+ *   ::getPending() answers them with the queued entry, so a process never misses
+ *   its own write, and across processes ::WRITE_IF_NOT_NEWER orders the two by
+ *   creation stamp. Verified against the real two-process sequence: module and
+ *   stock end in the same state. The residual difference is that a batched
+ *   CacheCollector write leaves the lock before it reaches Redis, so a second
+ *   process can merge onto a state this one has already superseded and win. That
+ *   race is CacheCollector's own - stock loses it more often than this backend
+ *   does, 12 of 15 against 10 of 15 with free-running concurrency - and no
+ *   request was observed serving a wrong active trail either way.
+ *
+ * cache.data was on this list until a review found what the read-to-decide
+ * condition is for, and the difference from the two core readers above is the
+ * process boundary: those two read through this backend and are answered by
+ * ::getPending(), while the case below turns on a read in a *later* request that
+ * the queue of an earlier one cannot answer.
+ * The contributed redirect module keeps redirect_prefix_list:<prefix> there
  * - permanent, untagged, and holding the answer to "does any redirect start with
  * this prefix". Redirect::postSave() corrects that entry only if it *reads* it
  * and finds FALSE; a queued write is invisible to that read, so the correction
