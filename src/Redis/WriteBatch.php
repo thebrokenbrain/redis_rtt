@@ -48,8 +48,8 @@ use Drupal\redis\ClientInterface;
  *   in menu. No tag counter can age one of those out. What keeps them right is
  *   the first condition plus ::WRITE_IF_NOT_NEWER, not this one.
  * - None of them is a chained-fast bin, so there is no "last write" marker that
- *   has to reach Redis behind the data it announces. The chained-fast bins are
- *   bootstrap, config and discovery, and ::handles() returns FALSE for all three.
+ * has to reach Redis behind the data it announces. The chained-fast bins are
+ * bootstrap, config and discovery, and ::handles() returns FALSE for all three.
  * - Something DOES read one of their keys to decide what to write, and this
  *   entry used to claim the opposite. VariationCache::set() begins by reading
  *   the redirect chain and decides from it whether to write a new redirect or
@@ -57,34 +57,44 @@ use Drupal\redis\ClientInterface;
  *   own entry, and its 'created', to choose between merging, deleting and
  *   backing off - on cache.menu, through menu.active_trail.
  *
- *   What makes that survivable here, and did not make it survivable in
- *   cache.data, is that both of those readers read through this backend:
- *   ::getPending() answers them with the queued entry, so a process never misses
- *   its own write, and across processes ::WRITE_IF_NOT_NEWER orders the two by
- *   creation stamp. Verified against the real two-process sequence: module and
- *   stock end in the same state. The residual difference is that a batched
- *   CacheCollector write leaves the lock before it reaches Redis, so a second
- *   process can merge onto a state this one has already superseded and win. That
- *   race is CacheCollector's own - stock loses it more often than this backend
- *   does, 12 of 15 against 10 of 15 with free-running concurrency - and no
- *   request was observed serving a wrong active trail either way.
+ * What makes that survivable here, and did not make it survivable in
+ * cache.data, is that both of those readers read through this backend:
+ * ::getPending() answers them with the queued entry, so a process never misses
+ * its own write, and across processes ::WRITE_IF_NOT_NEWER orders the two by
+ * creation stamp, so neither can overwrite a newer entry.
+ *
+ * They do NOT always end in the same state, and this used to claim they did.
+ * Run the two-process CacheCollector sequence where the first request outlives
+ * the second - the same resolveCacheMiss()+persist() shape MenuActiveTrail has,
+ * on cache.menu - and the module ends holding X,B where stock holds X,A,B, six
+ * times out of six per side. The lost key is recomputed on the next read, so
+ * the cost is a cache miss rather than wrong content, and ::WRITE_IF_NOT_NEWER
+ * does hold throughout; but "the same state" was not measured and is not true.
+ *
+ * The cause is that a batched CacheCollector write leaves the lock before it
+ * reaches Redis, so a second process can merge onto a state this one has
+ * already superseded. The race is CacheCollector's own and stock loses it too:
+ * measured with free-running concurrency, 9 of 45 against 7 of 45 here. Do not
+ * read that gap as a result - 12 of 15 against 10 of 15, the figures this entry
+ * used to carry, is p = 0.68 on a Fisher test, which is a tie. What can be said
+ * is that no request was observed serving a wrong active trail either way.
  *
  * cache.data was on this list until a review found what the read-to-decide
  * condition is for, and the difference from the two core readers above is the
  * process boundary: those two read through this backend and are answered by
- * ::getPending(), while the case below turns on a read in a *later* request that
- * the queue of an earlier one cannot answer.
- * The contributed redirect module keeps redirect_prefix_list:<prefix> there
- * - permanent, untagged, and holding the answer to "does any redirect start with
- * this prefix". Redirect::postSave() corrects that entry only if it *reads* it
- * and finds FALSE; a queued write is invisible to that read, so the correction
- * never happens and the queued FALSE lands afterwards. A redirect the editor can
- * see in the admin listing then answers 404 for a year.
+ * ::getPending(), while the case below turns on a read in a *later* request
+ * that the queue of an earlier one cannot answer. The contributed redirect
+ * module keeps redirect_prefix_list:<prefix> there - permanent, untagged, and
+ * holding the answer to "does any redirect start with this prefix".
+ * Redirect::postSave() corrects that entry only if it *reads* it and finds
+ * FALSE; a queued write is invisible to that read, so the correction never
+ * happens and the queued FALSE lands afterwards. A redirect the editor can see
+ * in the admin listing then answers 404 for a year.
  *
  * The lesson is about the bin, not the module: cache.data is a general-purpose
- * scratch bin that any module writes to with whatever discipline it likes, while
- * render, menu and dynamic_page_cache are written by core to one. A bin nobody
- * owns cannot be checked once and trusted.
+ * scratch bin that any module writes to with whatever discipline it likes,
+ * while render, menu and dynamic_page_cache are written by core to one. A bin
+ * nobody owns cannot be checked once and trusted.
  *
  * cache.entity, cache.default and the chained-fast bins each fail one of those,
  * and they lose almost nothing by writing immediately: cache.entity already

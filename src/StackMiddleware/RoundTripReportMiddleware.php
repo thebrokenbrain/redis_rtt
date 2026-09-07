@@ -69,20 +69,28 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
    *   is missing from every field, not just from the batch counters.
    *
    *   Measured on a warm authenticated node view: the header reported 24 round
-   *   trips against stock and 16 against this module, where the wire saw 35 and
-   *   26. That is 11 and 10 hidden, and only ONE of them falls after the
-   *   response - the other ten are BigPipe placeholders being rendered inside
-   *   Response::send(), all of them reads. The one write from a
-   *   needs_destruction service that this used to name as the whole of the gap
-   *   is a tenth of it.
+   *   trips against stock and 16 against this module, where the wire saw 36
+   *   and 27.5. That is 12 and 11.5 hidden, and they are BigPipe placeholders
+   *   being rendered inside Response::send() - all of them reads. An earlier
+   *   version of this entry named a write from a needs_destruction service as
+   *   the whole of the gap, and then as a twelfth of it; both were wrong. On
+   *   that page there is no write at all, by MONITOR: 34 and 36 commands,
+   *   every one of them a GET, HGETALL or MGET.
    *
-   *   The consequence worth knowing is not the absolute numbers but what they do
-   *   to a percentage: the hidden block is nearly constant and both
-   *   configurations pay it, so subtracting it from numerator and denominator
-   *   inflates the saving. That warm view reads as -33.3% from the header and is
-   *   -25.7% on the wire. Cold pages barely move (-45.6% against -45.2%), and in
-   *   at least one scenario the bias runs the other way. Treat the header as a
-   *   floor, quote wire figures for percentages, and let MONITOR arbitrate.
+   *   The consequence worth knowing is not the absolute numbers but what they
+   *   do to a percentage: both configurations pay the hidden block, so
+   *   subtracting it from numerator and denominator inflates the saving. That
+   *   warm view reads as -33.3% from the header and is -23.6% on the wire.
+   *   Cold pages barely move: -45.2% from the header against -44.6% on the
+   *   wire.
+   *
+   *   Two qualifications this entry used to get wrong. The hidden block is
+   *   near-constant only on warm pages - measured, 11 commands after the
+   *   response in all six readings, on both sides - and not on cold ones,
+   *   where it was 66 with stock against 42 with this module. And the bias has
+   *   not been seen to run the other way: it went the same direction in all
+   *   four scenarios measured. Treat the header as a floor, quote wire figures
+   *   for percentages, and let MONITOR arbitrate.
    */
   public function __construct(
     protected HttpKernelInterface $httpKernel,

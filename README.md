@@ -193,7 +193,7 @@ $settings['bootstrap_container_definition'] = [
 | `redis_rtt_chain_memo_limit` | `1000` | Maximum render cache chains memoised in one request. |
 | `redis_rtt_tag_warmset_limit` | `400` | Maximum cache tags preloaded in one `MGET`. |
 | `redis_rtt_tag_warmset_min_hits` | `3` | Requests a tag must appear in before it is preloaded. |
-| `redis_rtt_tag_warmset_ttl` | `1.0` | Seconds a preloaded checksum may answer for its tag. |
+| `redis_rtt_tag_warmset_ttl` | `1.0` | Seconds a preloaded checksum may answer for its tag. Inside that window this module can serve an entry another process just invalidated; `0` removes the window. See Troubleshooting. |
 | `redis_rtt_batch_writes` | `TRUE` | Send the writes of tag-invalidated bins in batches. |
 | `redis_rtt_max_batched_writes` | `100` | Writes that force a batch out early. |
 | `redis_rtt_batched_bins` | see below | The only bins whose writes are batched. |
@@ -608,11 +608,24 @@ Point it at `Drupal\redis_rtt\ClientFactory`; see Configuration.
 If round trips dropped but wall time did not, the network is not your
 bottleneck and this module has nothing to offer you.
 
-**A cache entry looks stale or comes back after being deleted.** Set
-`redis_rtt_batch_writes = FALSE` and rebuild caches. That restores the stock
-write path exactly. If the symptom goes away, the bin involved is one the
-batching should not have taken: name the remaining bins in
-`redis_rtt_batched_bins` and please open an issue saying which one it was.
+**A cache entry looks stale or comes back after being deleted.** There are two
+independent mechanisms in this module that can produce that symptom, and they
+have separate switches. Try them in this order, because the second is the
+cheaper test and the more likely cause of *stale* specifically:
+
+1. Set `redis_rtt_tag_warmset_ttl = 0` and rebuild caches. That stops a cache
+   tag counter read ahead of time from answering for its tag at all. Within that
+   window - one second by default - this module can serve an entry another
+   process has just invalidated, and can stamp an entry it writes with a counter
+   that is already superseded; the stock backend does neither, because it never
+   holds a counter for a tag nobody asked for. The cost of turning it off is
+   round trips: measured at 18 of the 30 this module saves on a warm edit form.
+2. Set `redis_rtt_batch_writes = FALSE` and rebuild caches. That restores the
+   stock write path exactly. If the symptom goes away here, the bin involved is
+   one the batching should not have taken: name the remaining bins in
+   `redis_rtt_batched_bins` and please open an issue saying which one it was.
+
+If neither changes anything, the cause is not in this module.
 
 **`batches` is high relative to `batched-writes` in the header.** The limit is
 set far below 100. It costs round trips rather than correctness. Note that

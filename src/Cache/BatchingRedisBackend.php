@@ -278,13 +278,13 @@ LUA;
    * risk writing back an entry that was meant to be gone, so it is dropped.
    *
    * What that costs is not "one cache miss", as this used to say. Measured: on
-   * a rollback the entry left in Redis is the one from *before* the transaction,
-   * served as a valid HIT, not a miss - the queued write that would have
-   * replaced it is gone. Stock, which never sent the DEL, is left holding the
-   * new value instead. Neither is the state the transaction intended and both
-   * self-heal on the next tag invalidation; the direction they are wrong in is
-   * opposite, and for a value derived from a database row it is this backend
-   * that agrees with the database and stock that does not.
+   * a rollback the entry left in Redis is the one from *before* the
+   * transaction, served as a valid HIT, not a miss - the queued write that
+   * would have replaced it is gone. Stock, which never sent the DEL, is left
+   * holding the new value instead. Neither is the state the transaction
+   * intended and both self-heal on the next tag invalidation; the direction
+   * they are wrong in is opposite, and for a value derived from a database row
+   * it is this backend that agrees with the database and stock that does not.
    *
    * @param string[] $cids
    *   The cache IDs to delete.

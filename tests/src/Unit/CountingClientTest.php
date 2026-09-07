@@ -175,7 +175,7 @@ class CountingClientTest extends UnitTestCase {
    */
   public function testConsecutivePipelinesAreCountedSeparately(): void {
     $client = $this->client();
-    foreach ([0, 1] as $unused) {
+    for ($pipeline = 0; $pipeline < 2; $pipeline++) {
       $client->pipeline();
       $client->get('a');
       $client->get('b');
