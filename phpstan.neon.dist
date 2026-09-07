@@ -16,3 +16,13 @@ parameters:
         -
             identifier: method.notFound
             message: '#Call to an undefined method Drupal\\redis\\ClientInterface::#'
+        # LuaRedisLockTest::register() swaps the 'lock' service for this
+        # module's backend, which is the whole point of the test. Static
+        # analysis reads the type off core's default service definition and
+        # concludes the assertion can never pass; at runtime it is the only
+        # thing that can. Asserting it is worth more than the analyser's
+        # opinion of it: without this assertion the class would silently go on
+        # testing core's database lock if the factory wiring ever broke.
+        -
+            identifier: method.impossibleType
+            path: tests/src/Kernel/LuaRedisLockTest.php

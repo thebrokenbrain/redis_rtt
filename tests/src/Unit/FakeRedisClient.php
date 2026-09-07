@@ -18,9 +18,17 @@ use Drupal\redis\ClientInterface;
  * batched write and the invalidation - read the deciding line out of the script
  * text before acting on it, so deleting or inverting that line in the real
  * script fails a test rather than quietly passing against a stand-in that kept
- * the behaviour on its own account. The lock scripts do not, and no test
- * asserts on their conditions; the scripts themselves are exercised against a
- * real Redis in redis_rtt-auditoria/reproducciones/.
+ * the behaviour on its own account.
+ *
+ * The lock scripts do not, and nothing here asserts on their conditions. This
+ * used to say they were "exercised against a real Redis in
+ * redis_rtt-auditoria/reproducciones/", which was not true: not one of the
+ * reproductions there mentioned a lock, so the sentence pointed at a
+ * compensating control that did not exist, and six mutations of the lock -
+ * ::release() deleting anyone's lock among them - left the whole suite green.
+ * The cover is now \Drupal\Tests\redis_rtt\Kernel\LuaRedisLockTest, which runs
+ * core's lock contract plus the ownership cases against a real Redis. Anything
+ * added to the lock scripts belongs there, not here.
  *
  * The counter that matters is $roundTrips: one per command issued outside a
  * pipeline, one per exec(). That is what a cross-AZ hop actually costs, and it
