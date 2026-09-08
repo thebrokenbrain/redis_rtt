@@ -4,25 +4,11 @@ services:
   #   $settings['cache']['default'] = 'cache.backend.redis_rtt';
   # ---------------------------------------------------------------------------
   cache.backend.redis_rtt:
-    class: Drupal\redis_rtt\Cache\BatchingCacheBackendFactory
+    class: Drupal\redis_rtt\Cache\PipeliningCacheBackendFactory
     arguments:
       - '@redis.factory'
       - '@cache_tags.invalidator.checksum'
       - '@serialization.phpserialize'
-      - '@redis_rtt.write_batch'
-
-  # ---------------------------------------------------------------------------
-  # One write batch shared by every cache bin, so that a single pipeline carries
-  # whatever the request is writing instead of one pipeline per bin. Which bins
-  # it takes, and why the rest write immediately, is documented on the class.
-  #
-  # Turn it off with $settings['redis_rtt_batch_writes'] = FALSE.
-  # ---------------------------------------------------------------------------
-  redis_rtt.write_batch:
-    class: Drupal\redis_rtt\Redis\WriteBatch
-    arguments:
-      - '@redis.factory'
-      - '@settings'
 
   # ---------------------------------------------------------------------------
   # Connection factory that keeps AUTH/SELECT off the per-request path.
@@ -59,10 +45,6 @@ services:
   # ---------------------------------------------------------------------------
   redis_rtt.round_trip_report:
     class: Drupal\redis_rtt\StackMiddleware\RoundTripReportMiddleware
-    # The decorated kernel is prepended by StackedKernelPass, so this list only
-    # carries what comes after it.
-    arguments:
-      - '@redis_rtt.write_batch'
     tags:
       - { name: http_middleware, priority: 1000 }
 

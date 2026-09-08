@@ -14,11 +14,11 @@ use Drupal\redis\ClientInterface;
  * phpredis' pipeline semantics where queued commands return the client and
  * exec() returns the ordered replies.
  *
- * It recognises those scripts, it does not run Lua. Both cache branches - the
- * batched write and the invalidation - read the deciding line out of the script
- * text before acting on it, so deleting or inverting that line in the real
- * script fails a test rather than quietly passing against a stand-in that kept
- * the behaviour on its own account.
+ * It recognises those scripts, it does not run Lua. The cache invalidation
+ * branch reads the deciding line out of the script text before acting on it, so
+ * deleting or inverting that line in the real script fails a test rather than
+ * quietly passing against a stand-in that kept the behaviour on its own
+ * account.
  *
  * The lock scripts do not, and nothing here asserts on their conditions. This
  * used to say they were "exercised against a real Redis in
@@ -33,7 +33,8 @@ use Drupal\redis\ClientInterface;
  * The counter that matters is $roundTrips: one per command issued outside a
  * pipeline, one per exec(). That is what a cross-AZ hop actually costs, and it
  * is what the tests assert on - asserting on the number of commands would miss
- * the point entirely, since batching deliberately increases that number.
+ * the point entirely, since pipelining a set of commands leaves their number
+ * unchanged and their cost divided.
  */
 final class FakeRedisClient implements ClientInterface {
 
@@ -223,30 +224,6 @@ final class FakeRedisClient implements ClientInterface {
    *   The script's return value.
    */
   private function runScript(string $script, array $args): int {
-    // Batched cache write, guarded on the stored creation stamp.
-    if (str_contains($script, "'created'")) {
-      $key = (string) array_shift($args);
-      $created = (float) array_shift($args);
-      // Eviction is not simulated, but the TTL is kept: a write that stops
-      // carrying one, or carries the wrong one, is a real defect and a stand-in
-      // that threw the value away could not fail a test about it.
-      $ttl = (string) array_shift($args);
-      // The guard is read out of the script rather than assumed, so that a test
-      // asserting on it fails if it is ever removed from the script itself.
-      $guarded = str_contains($script, 'tonumber(stored) > tonumber(ARGV[1])');
-      $stored = $this->data[$key]['created'] ?? NULL;
-      if ($guarded && $stored !== NULL && (float) $stored > $created) {
-        return 0;
-      }
-      $hash = [];
-      for ($i = 0; $i < count($args); $i += 2) {
-        $hash[(string) $args[$i]] = (string) $args[$i + 1];
-      }
-      $this->data[$key] = $hash + (is_array($this->data[$key] ?? NULL) ? $this->data[$key] : []);
-      $this->ttls[$key] = $ttl === '' ? NULL : (int) $ttl;
-      return 1;
-    }
-
     // Cache entry invalidation. Like the branch above, the deciding line is
     // read out of the script rather than reimplemented here: a stand-in that
     // invalidates on its own account passes whatever the real script does, and

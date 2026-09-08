@@ -7,7 +7,6 @@ namespace Drupal\redis_rtt\StackMiddleware;
 use Drupal\Core\Database\Database;
 use Drupal\Core\Site\Settings;
 use Drupal\redis_rtt\Client\CountingClient;
-use Drupal\redis_rtt\Redis\WriteBatch;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\HttpKernelInterface;
@@ -55,46 +54,9 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
    *
    * @param \Symfony\Component\HttpKernel\HttpKernelInterface $httpKernel
    *   The kernel to decorate.
-   * @param \Drupal\redis_rtt\Redis\WriteBatch|null $batch
-   *   (optional) The write batch, sent before the report is built. Batched
-   *   writes normally leave at the end of the request, after the response has
-   *   gone out; a report that stopped before them would under-count almost
-   *   every round trip they cost, which is exactly the number this header
-   *   exists to state.
-   *
-   *   Almost, and not all - and the gap is bigger and differently caused than
-   *   this used to say. The header has to be set on a response that is about to
-   *   be returned, so it is written before the response is sent and before
-   *   kernel.terminate. Everything the request does with Redis after that point
-   *   is missing from every field, not just from the batch counters.
-   *
-   *   Measured on a warm authenticated node view: the header reported 24 round
-   *   trips against stock and 16 against this module, where the wire saw 36
-   *   and 27.5. That is 12 and 11.5 hidden, and they are BigPipe placeholders
-   *   being rendered inside Response::send() - all of them reads. An earlier
-   *   version of this entry named a write from a needs_destruction service as
-   *   the whole of the gap, and then as a twelfth of it; both were wrong. On
-   *   that page there is no write at all, by MONITOR: 34 and 36 commands,
-   *   every one of them a GET, HGETALL or MGET.
-   *
-   *   The consequence worth knowing is not the absolute numbers but what they
-   *   do to a percentage: both configurations pay the hidden block, so
-   *   subtracting it from numerator and denominator inflates the saving. That
-   *   warm view reads as -33.3% from the header and is -23.6% on the wire.
-   *   Cold pages barely move: -45.2% from the header against -44.6% on the
-   *   wire.
-   *
-   *   Two qualifications this entry used to get wrong. The hidden block is
-   *   near-constant only on warm pages - measured, 11 commands after the
-   *   response in all six readings, on both sides - and not on cold ones,
-   *   where it was 66 with stock against 42 with this module. And the bias has
-   *   not been seen to run the other way: it went the same direction in all
-   *   four scenarios measured. Treat the header as a floor, quote wire figures
-   *   for percentages, and let MONITOR arbitrate.
    */
   public function __construct(
     protected HttpKernelInterface $httpKernel,
-    protected ?WriteBatch $batch = NULL,
   ) {}
 
   /**
@@ -114,11 +76,6 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
     }
 
     $response = $this->httpKernel->handle($request, $type, $catch);
-
-    // Send whatever is still queued, so the counts below include it. Quietly:
-    // the response is already built, and a diagnostic header is no reason to
-    // turn a failed cache write into a failed request.
-    $this->batch?->sendQuietly();
 
     $response->headers->set('X-Redis-RTT', implode('; ', $this->report()));
 
@@ -149,12 +106,6 @@ class RoundTripReportMiddleware implements HttpKernelInterface {
     }
     catch (\Exception) {
       // Logging was never started, or the connection is gone.
-    }
-
-    if ($this->batch) {
-      $stats = $this->batch->getStats();
-      $parts[] = 'batches=' . $stats['batches'];
-      $parts[] = 'batched-writes=' . $stats['writes'];
     }
 
     return $parts;

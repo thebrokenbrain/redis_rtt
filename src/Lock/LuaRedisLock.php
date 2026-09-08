@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Drupal\redis_rtt\Lock;
 
 use Drupal\redis\Lock\RedisLock;
-use Drupal\redis_rtt\Redis\WriteBatch;
+use Drupal\redis_rtt\Redis\Pipeline;
 
 /**
  * Redis lock backend that uses one round trip per operation.
@@ -111,8 +111,8 @@ LUA;
     }
     catch (\Exception $e) {
       // A pipeline of scripts that times out mid-flight leaves the connection
-      // reading the previous command's replies. See WriteBatch::discard().
-      WriteBatch::discard($this->client);
+      // reading the previous command's replies. See Pipeline::discard().
+      Pipeline::discard($this->client);
       throw $e;
     }
   }

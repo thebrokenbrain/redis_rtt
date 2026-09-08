@@ -11,7 +11,7 @@ use Drupal\Core\Cache\CacheTagsChecksumInterface;
 use Drupal\Core\Database\Connection;
 use Drupal\Core\DependencyInjection\ContainerBuilder;
 use Drupal\Tests\UnitTestCase;
-use Drupal\redis_rtt\Cache\BatchingRedisBackend;
+use Drupal\redis_rtt\Cache\PipeliningRedisBackend;
 
 /**
  * Checks that the backend spends fewer network waits than the stock one.
@@ -21,10 +21,10 @@ use Drupal\redis_rtt\Cache\BatchingRedisBackend;
  * and the whole point is that they travel together: on a cache a millisecond
  * away, what a request pays for is the waiting, not the work.
  *
- * @coversDefaultClass \Drupal\redis_rtt\Cache\BatchingRedisBackend
+ * @coversDefaultClass \Drupal\redis_rtt\Cache\PipeliningRedisBackend
  * @group redis_rtt
  */
-class BatchingRedisBackendTest extends UnitTestCase {
+class PipeliningRedisBackendTest extends UnitTestCase {
 
   /**
    * The key prefix every backend in this test shares.
@@ -64,15 +64,15 @@ class BatchingRedisBackendTest extends UnitTestCase {
    * @param \Drupal\Core\Cache\CacheTagsChecksumInterface|null $checksum
    *   (optional) The checksum provider to use.
    *
-   * @return \Drupal\redis_rtt\Cache\BatchingRedisBackend
+   * @return \Drupal\redis_rtt\Cache\PipeliningRedisBackend
    *   The backend.
    */
-  protected function backend(?CacheTagsChecksumInterface $checksum = NULL): BatchingRedisBackend {
+  protected function backend(?CacheTagsChecksumInterface $checksum = NULL): PipeliningRedisBackend {
     if ($checksum === NULL) {
       $checksum = $this->createMock(CacheTagsChecksumInterface::class);
       $checksum->method('isValid')->willReturn(TRUE);
     }
-    $backend = new BatchingRedisBackend('render', $this->client, $checksum, new PhpSerialize());
+    $backend = new PipeliningRedisBackend('render', $this->client, $checksum, new PhpSerialize());
     $backend->setPrefix(self::PREFIX);
 
     return $backend;

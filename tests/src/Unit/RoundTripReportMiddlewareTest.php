@@ -6,8 +6,6 @@ namespace Drupal\Tests\redis_rtt\Unit;
 
 use Drupal\Core\Site\Settings;
 use Drupal\Tests\UnitTestCase;
-use Drupal\redis\ClientFactory;
-use Drupal\redis_rtt\Redis\WriteBatch;
 use Drupal\redis_rtt\StackMiddleware\RoundTripReportMiddleware;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -30,17 +28,14 @@ class RoundTripReportMiddlewareTest extends UnitTestCase {
   /**
    * Builds the middleware over a kernel that returns a plain response.
    *
-   * @param \Drupal\redis_rtt\Redis\WriteBatch|null $batch
-   *   (optional) The batch to send before reporting.
-   *
    * @return \Drupal\redis_rtt\StackMiddleware\RoundTripReportMiddleware
    *   The middleware.
    */
-  protected function middleware(?WriteBatch $batch = NULL): RoundTripReportMiddleware {
+  protected function middleware(): RoundTripReportMiddleware {
     $kernel = $this->createMock(HttpKernelInterface::class);
     $kernel->method('handle')->willReturn(new Response('hola'));
 
-    return new RoundTripReportMiddleware($kernel, $batch);
+    return new RoundTripReportMiddleware($kernel);
   }
 
   /**
@@ -76,49 +71,6 @@ class RoundTripReportMiddlewareTest extends UnitTestCase {
     foreach (['redis-trips=', 'redis-cmds=', 'redis-ms='] as $field) {
       $this->assertStringContainsString($field, $header);
     }
-  }
-
-  /**
-   * A batch that cannot be sent does not take the response down with it.
-   *
-   * By the time this runs the response exists, and a diagnostic header is no
-   * reason to turn a failed cache write into a failed page. ::sendQuietly() is
-   * the whole difference; pointing this at ::send() used to pass every test.
-   *
-   * @covers ::handle
-   */
-  public function testFailedBatchDoesNotBreakTheResponse(): void {
-    new Settings(['redis_rtt_report' => TRUE]);
-
-    $factory = $this->createMock(ClientFactory::class);
-    $factory->method('getClient')->willThrowException(new \RuntimeException('Redis is gone'));
-    $batch = new WriteBatch($factory, new Settings(['redis_rtt_report' => TRUE]));
-    $batch->add('cualquiera', ['cid' => 'x', 'created' => 1, 'data' => 'v'], NULL);
-
-    $response = $this->middleware($batch)->handle(Request::create('/'));
-
-    $this->assertSame('hola', $response->getContent(), 'The page must still be served.');
-    $this->assertSame(0, $batch->getStats()['pending'], 'And the queue must have been attempted.');
-  }
-
-  /**
-   * What the batch did is reported alongside the round trips.
-   *
-   * @covers ::report
-   */
-  public function testTheHeaderReportsWhatTheBatchDid(): void {
-    $factory = $this->createMock(ClientFactory::class);
-    $factory->method('getClient')->willReturn(new FakeRedisClient());
-    $batch = new WriteBatch($factory, new Settings([]));
-    $batch->add('una', ['cid' => 'x', 'created' => 1, 'data' => 'v'], NULL);
-    // Last, because building a Settings object replaces the singleton the
-    // middleware reads: doing it first would silently switch the report off.
-    new Settings(['redis_rtt_report' => TRUE]);
-
-    $header = $this->middleware($batch)->handle(Request::create('/'))->headers->get('X-Redis-RTT');
-
-    $this->assertStringContainsString('batches=1', (string) $header);
-    $this->assertStringContainsString('batched-writes=1', (string) $header);
   }
 
 }

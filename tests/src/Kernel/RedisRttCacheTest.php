@@ -8,7 +8,7 @@ use Drupal\Core\Cache\Cache;
 use Drupal\Core\DependencyInjection\ContainerBuilder;
 use Drupal\Core\Site\Settings;
 use Drupal\KernelTests\Core\Cache\GenericCacheBackendUnitTestBase;
-use Drupal\redis_rtt\Cache\BatchingRedisBackend;
+use Drupal\redis_rtt\Cache\PipeliningRedisBackend;
 use Symfony\Component\DependencyInjection\Reference;
 
 /**
@@ -39,16 +39,6 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
    * {@inheritdoc}
    */
   protected static $modules = ['system', 'redis', 'redis_rtt'];
-
-  /**
-   * Bins this run adds to the batched list, on top of the module's defaults.
-   *
-   * Empty here: the contract is run first against the write path as any bin
-   * outside the batched list gets it, which is the stock path.
-   *
-   * @var string[]
-   */
-  protected array $extraBatchedBins = [];
 
   /**
    * {@inheritdoc}
@@ -83,18 +73,6 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
     // prefix (test46520047:page:...). Setting cache_prefix here looked like it
     // provided that and did not: the redis module derives the prefix and never
     // reads this. A dead line crediting the wrong mechanism is worse than none.
-    // The module's own defaults, plus whatever the subclass adds. Spelling the
-    // defaults out here means they have to be kept in step with WriteBatch, and
-    // they had already fallen out of step: this list carried 'data' long after
-    // it was taken off the batched list for safety, so every inherited
-    // assertion ran against a bin list the module does not ship.
-    if ($this->extraBatchedBins) {
-      $settings['redis_rtt_batched_bins'] = array_merge(
-        ['render', 'menu', 'dynamic_page_cache'],
-        $this->extraBatchedBins,
-      );
-    }
-
     new Settings($settings);
   }
 
@@ -115,10 +93,10 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
    * @param string $bin
    *   The cache bin.
    *
-   * @return \Drupal\redis_rtt\Cache\BatchingRedisBackend
+   * @return \Drupal\redis_rtt\Cache\PipeliningRedisBackend
    *   The backend for that bin.
    */
-  protected function backendFor(string $bin): BatchingRedisBackend {
+  protected function backendFor(string $bin): PipeliningRedisBackend {
     return \Drupal::service('cache.backend.redis_rtt')->get($bin);
   }
 
@@ -184,7 +162,6 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
     $backend = $this->getCacheBackend();
     $backend->set('permanent', 'value');
     $backend->set('expiring', 'value', \Drupal::time()->getRequestTime() + 600);
-    $this->flushBatch();
 
     $client = \Drupal::service('redis.factory')->getClient();
     // The key comes from the backend rather than being rebuilt here: the prefix
@@ -211,7 +188,6 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
     $backend = $this->getCacheBackend();
     $backend->set('etiquetado', 'value', Cache::PERMANENT, ['prueba:1']);
     $backend->set('sin_etiqueta', 'value');
-    $this->flushBatch();
 
     Cache::invalidateTags(['prueba:1']);
 
@@ -237,7 +213,6 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
     // unresolved, exactly as a fresh request would.
     $backend = $this->backendFor('marcador');
     $backend->set('anterior', 'value');
-    $this->flushBatch();
 
     // What deleteAll() does on the wire, done by somebody else. The pauses are
     // the ones the stock ::deleteAll() takes for the same reason: the marker is
@@ -253,15 +228,7 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
 
     // And the bin still works afterwards.
     $backend->set('posterior', 'value');
-    $this->flushBatch();
     $this->assertNotEmpty($backend->get('posterior'), 'An entry written after the flush is served normally.');
-  }
-
-  /**
-   * Sends anything the batch is still holding, so Redis can be inspected.
-   */
-  protected function flushBatch(): void {
-    \Drupal::service('redis_rtt.write_batch')->send();
   }
 
 }

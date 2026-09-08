@@ -12,13 +12,17 @@ another: each answer decides what to ask next.
 
 This module makes the same work wait for the network far less often. Reads that
 Drupal issues one at a time are gathered into single pipelines; the writes of
-three bins travel in batches instead of one round trip each.
+What that changes is the waiting, not the work. Reads that were sequential are
+pipelined, compare-and-act protocols are moved into Lua, and a chain that had to
+be walked one hop at a time is fetched in one go once its shape is known. The
+clearest scenario is a warm content listing: 166 waits become 85, and 359 ms
+become 230. On a heavy authenticated page built from cold, 817 become 690.
 
-What that changes is the waiting, not the work. Across the seven scenarios
-measured below the command count moves by between 0.5% and 23%, while the number
-of network waits halves. The clearest of them is a warm edit form: 0.5% fewer
-commands, 47% fewer waits. On a heavy authenticated page built from cold, 815
-waits become 445.
+Writes are not deferred. They go to Redis at the point the stock backend sends
+them, which is a deliberate reversal: an earlier version of this module held
+them and sent them in batches, and that was worth a further 245 waits on a cold
+page and nothing at all on a warm one. It was also the only part of the module
+whose correctness had to be argued rather than read. See **Writes** below.
 
 For a full description of the module, visit the
 [project page](https://www.drupal.org/project/redis_rtt).
@@ -34,7 +38,6 @@ Submit bug reports and feature suggestions, or track changes in the
 - Installation
 - Configuration
 - How it works
-  - Batched writes
 - Measured results
 - Troubleshooting
 - FAQ
@@ -137,7 +140,7 @@ them, uninstalling the module fails with a `ServiceNotFoundException`.
 ### Service overrides
 
 `redis_rtt.services.example.yml` contains the individual service overrides:
-the batched cache tag checksums, the single-round-trip locks and the render
+the cache tag checksums in one `MGET`, the single-round-trip locks and the render
 cache redirect shortcut. Each is independent and can be left commented out, so
 the module can be rolled out in stages.
 
@@ -194,42 +197,24 @@ $settings['bootstrap_container_definition'] = [
 | `redis_rtt_tag_warmset_limit` | `400` | Maximum cache tags preloaded in one `MGET`. |
 | `redis_rtt_tag_warmset_min_hits` | `3` | Requests a tag must appear in before it is preloaded. |
 | `redis_rtt_tag_warmset_ttl` | `1.0` | Seconds a preloaded checksum may answer for its tag. Inside that window this module can serve an entry another process just invalidated; `0` removes the window. See Troubleshooting. |
-| `redis_rtt_batch_writes` | `TRUE` | Send the writes of tag-invalidated bins in batches. |
-| `redis_rtt_max_batched_writes` | `100` | Writes that force a batch out early. |
-| `redis_rtt_batched_bins` | see below | The only bins whose writes are batched. |
-| `redis_rtt_log_errors` | `FALSE` | Warn when a batch fails to reach Redis. |
 | `redis_rtt_report` | `FALSE` | Emit the `X-Redis-RTT` measurement header. |
 | `redis_rtt_report_top_commands` | `FALSE` | Add `X-Redis-RTT-Commands` with the per-command breakdown. |
-
-`redis_rtt_batched_bins` defaults to `['render', 'menu',
-'dynamic_page_cache']`. It is a list of bins that have been checked against the
-four conditions in **Batched writes** below, not a list of bins that have been
-ruled out: every other bin, including any a contributed module declares, writes
-immediately. Remove a bin from the list if a module on your site deletes its
-keys one at a time. Setting `redis_rtt_batch_writes` to `FALSE` restores the
-stock write path exactly, and is the first thing to try if a cache entry ever
-looks wrong.
 
 A Redis write that fails - a failover, a replica that has gone read-only, a full
 instance - raises the same `RedisException` from the same place as the stock
 backend, and the request fails with it. There is no setting to change that,
 because there is no difference from stock to change.
 
-That includes a batch that fails while the request is still running - when 100
-writes have accumulated and the batch goes out mid-request. A full instance under
-a noeviction policy, or a replica promoted to read-only, answers reads and
-refuses writes; stock returns a 500 for that, and so does this.
+A full instance under a noeviction policy, or a replica promoted to read-only,
+answers reads and refuses writes; stock returns a 500 for that, and so does
+this.
 
-The one place a failure is reported rather than raised is the batch sent at the
-end of the request. By then the response has gone out - in PHP-FPM the client
-already has every byte of it - so there is no request left to fail, and raising
-would only put a fatal in the log after the fact. Set `redis_rtt_log_errors` to
-see those.
-
-Either way the entries in a failed batch are dropped rather than retried. They
-are cache entries, so the cost is that something recomputes them; resending them
-later would risk writing back an entry that a delete has since made wrong, which
-is the failure this whole design exists to avoid.
+A pipeline that fails partway is a different matter, because phpredis is then
+holding a socket with replies still queued on it and the next command would read
+the previous one's reply - on a persistent connection, in the next request. The
+two places this module opens a pipeline of scripts, `invalidateMultiple()` and
+`LuaRedisLock::releaseAll()`, close the connection on failure for that reason;
+phpredis reconnects on the next command.
 
 The connection accepts these on top of the redis module's own: `tls`, `timeout`,
 `read_timeout`, `retry_interval`, `persistent_id`, `user`, `verify_peer`.
@@ -279,9 +264,8 @@ an instance without the module.
 
 1. Connection settings only: `FastPhpRedis`, `persistent`, timeouts.
 1. Cache tag checksums and locks.
-1. The cache backend, with `redis_rtt_batch_writes = FALSE`.
+1. The cache backend.
 1. The render cache redirect shortcut.
-1. Batched writes, by removing that line again.
 
 Each stage is reverted by removing or restoring one line. Cache entries have the same format
 as the stock backend's, so nothing persists in an incompatible state.
@@ -289,7 +273,7 @@ as the stock backend's, so nothing persists in an incompatible state.
 
 ## How it works
 
-Seven independent changes, all aimed at the same thing:
+Six independent changes, all aimed at the same thing:
 
 - **One round trip per bin read.** The stock backend spends an extra `GET` per
   bin per request fetching the "last delete all" marker the first time an entry
@@ -303,10 +287,10 @@ Seven independent changes, all aimed at the same thing:
   what came back before its answer is used - every hop has to still be the
   redirect that was learned - so a stale mapping degrades to a miss, never to
   wrong data.
-- **Batched cache tag checksums.** The redis backend issues a plain `GET` per
+- **Cache tag checksums in one `MGET`.** The redis backend issues a plain `GET` per
   single-tag checksum, and a page request makes about thirty of them. The set of
   tags a request touches is nearly constant, so it is learned and fetched in one
-  `MGET`. Checksums are still read fresh every request; only the batching
+  `MGET`. Checksums are still read fresh every request; only the grouping
   changes.
 - **One round trip per lock.** `release()` and lock renewal are
   compare-and-swap, done upstream with `WATCH`/`GET`/`MULTI`/`EXEC` - five
@@ -314,186 +298,46 @@ Seven independent changes, all aimed at the same thing:
   reads back `+QUEUED`, rather than holding them the way a pipeline does. A Lua
   script does the same atomically in one round trip, and without leaving a
   dangling `WATCH` on a persistent connection if the process dies.
-- **One round trip per invalidation batch.** `invalidateMultiple()` costs a
+- **One round trip per invalidation.** `invalidateMultiple()` costs a
   sequential `HGET` plus `HSET` per cache ID upstream.
-- **Batched writes, in the bins where that is safe.** Building a page cold
-  writes hundreds of render cache entries one round trip at a time. They travel
-  a hundred at a time instead. This is the one change that does not preserve
-  *when* data lands, so it is the one with a section of its own below.
 - **Connection hygiene.** Connect timeout, read timeout, retry interval, TCP
   keepalive and TLS. The PHP default read timeout is *unlimited*, so a
   connection dropped by a failover blocks the worker until the FPM request
   timeout - which is how a brief failover becomes an outage.
 
 Nothing is cached across requests except facts that are structural and
-self-verifying. Apart from the batched bins named below, every write, delete and
-invalidation reaches Redis exactly when the stock backend sends it.
+self-verifying, and every write, delete and invalidation reaches Redis exactly
+when the stock backend sends it.
 
 
-### Batched writes
+### Writes
 
-Every other change in this module is free: the same data reaches Redis at the
-same moment, in fewer waits. This one is not, and is worth understanding before
-turning it on in anger.
+Writes go to Redis at the point the stock backend sends them. There is no queue,
+no end-of-request flush and no window in which a write is held.
 
-A batched write is held in memory for the rest of the request. During that
-window another process can delete the key, and the flush then recreates it -
-Redis cannot tell "deleted" from "never existed". An earlier version of this
-module did that for *every* bin, and in `cache.entity` it made a saved node
-revert; the next save from the edit form then wrote the stale values back into
-the database. That version was removed rather than defaulted off.
+That is a change from earlier versions, which batched the writes of `render`,
+`menu` and `dynamic_page_cache` into one pipeline. It was the single largest
+saving the module made - about two thirds of the total on a cold page - and it
+was also the only mechanism here that could be wrong: a queued write that
+another process deleted in the meantime was recreated by the flush, because
+Redis cannot tell "deleted" from "never existed". It was bounded to three bins
+by four conditions, it never reproduced outside a deliberately misconfigured
+one, and the reproductions that proved so are still in the project's audit
+directory.
 
-What is batched now is only the bins where a revived entry is harmless, which
-takes all four of:
+It was removed anyway, and the reason is the shape of the trade rather than any
+failure. Measured, batching bought nothing at all on a warm page - a warm edit
+form is 31 waits with or without it, a warm content listing 85 either way,
+because a warm page writes almost nothing. Everything it bought was on cold
+pages, which are the minority of real traffic. Set against that: it was the one
+part of the module that had to be reasoned about before a deployment, the one
+with a documented residual risk, and the one whose safety depended on a list of
+bins nobody could keep current for a site's contributed modules.
 
-1. **Nothing deletes their keys one at a time.** Drupal 10.6 core has no caller
-   of `VariationCache::delete()`, and `RenderCache` exposes no delete method at
-   all. `MONITOR` over a node save, an edit through the form, three tag
-   invalidations and a full cron recorded zero `DEL`/`UNLINK`/`HDEL` against the
-   render bin, out of 15,806 commands.
-2. **Most of what they hold is invalidated through cache tags.** A revived
-   entry carries the tag counter from before the invalidation, so it is
-   discarded on read. Verified end to end: a node's four render entries were
-   dumped, the node was edited, the entries were restored byte for byte, and the
-   page kept serving the new title.
-
-   Not all of it, and this used to say otherwise. `VariationCache::set()` writes
-   its `CacheRedirect` pointers permanent and untagged on purpose, and they are
-   100% of the permanent untagged entries in these bins: measured, 215 of 459
-   render entries on a cold site, 64 of 130 in `dynamic_page_cache`, 0 of 82 in
-   `menu`. No tag counter can age one of those out. What keeps them right is the
-   first condition plus the creation-stamp guard on every batched write, not
-   this one.
-3. **They are not chained-fast bins**, so there is no "last write" marker that
-   has to reach Redis behind the data it announces.
-4. **Anything that reads one of their keys to decide what to write reads it
-   through this backend.** Not the same as the first condition: the danger there
-   is a delete the flush undoes, here it is a *read* that misses a queued write
-   and draws a conclusion from its absence.
-
-   This used to claim that nothing read them at all, which is false: core's
-   `VariationCache::set()` reads the redirect chain before deciding what to
-   write, and `CacheCollector::updateCache()` reads its own entry - on
-   `cache.menu`, through the menu active trail. Both read through this backend,
-   so the queue answers them and a process never misses its own write, and the
-   creation-stamp guard orders writes from different processes. That is what
-   `cache.data` could not offer: the read that mattered there was in a *later*
-   request, which no queue can answer.
-
-`cache.entity`, `cache.default` and the chained-fast bins each fail one of
-those and write immediately. They lose almost nothing by it: `cache.entity`
-already writes 3,109 entries in 91 round trips, because Drupal saves entities in
-bulk. The bin with the most to gain is also the safest one, which is what makes
-this worth doing at all.
-
-So does every bin not on the list. That direction matters: an exclusion list
-would batch `cache.page`, `cache.toolbar` and whatever bin a contributed module
-declares tomorrow, none of which anyone has checked. Handing untested bins the
-benefit of the doubt is the shape of reasoning that produced the data loss, so
-the setting names what may be batched rather than what may not.
-
-`cache.data` was on the list until a review found what the fourth condition is
-for. The [redirect](https://www.drupal.org/project/redirect) module keeps
-`redirect_prefix_list:<prefix>` there - permanent, untagged, and holding the
-answer to "does any redirect start with this prefix". `Redirect::postSave()`
-corrects that entry only if it *reads* it and finds `FALSE`; a queued write is
-invisible to that read, so the correction never happens and the queued `FALSE`
-lands after it. A redirect the editor can see in the admin listing then answers
-404, for a year, until any cache flush.
-
-The lesson is about the bin rather than that module. `cache.data` is a
-general-purpose scratch bin that any module writes to with whatever discipline it
-likes; `render`, `menu` and `dynamic_page_cache` are written by core to one. A
-bin nobody owns cannot be checked once and then trusted.
-
-Three further rules, each of them the memory of a bug:
-
-- A delete drops whatever this request had queued for that key, before the
-  delete goes out - inside a database transaction too, where the stock backend
-  defers the delete itself to the commit.
-- A read of a queued key is served from the queue, so a request never misses on
-  something it has just written.
-- Each batched write carries the creation stamp it had when `::set()` was
-  called, and is applied only if Redis does not already hold something newer.
-
-**The residual risk, stated plainly:** a contributed module that deletes a
-render key by hand is not covered, and no measurement can rule that out - only
-bound it. A site doing that should take the bin out of `redis_rtt_batched_bins`,
-or set `redis_rtt_batch_writes` to `FALSE`.
-
-### Does your site do this?
-
-The batching is safe for the three bins above because nothing deletes or
-invalidates their keys one at a time. Core does not: `MONITOR` over four
-independent sweeps - 131,000 commands of node, term, user, alias, menu and
-config saves, tag invalidation, cron, config import and export, and installing
-and uninstalling modules - recorded not one per-key delete against a batched
-bin. The only caller in core is the Views options UI
-(`GroupwiseMax::submitOptionsForm()`).
-
-A contributed module can still do it, and this module has no way to notice. Two
-patterns against `render`, `menu` or `dynamic_page_cache` take that bin off the
-list. The first is a per-key delete or invalidation:
-
-```php
-\Drupal::cache('render')->delete($cid);
-\Drupal::cache('menu')->deleteMultiple($cids);
-\Drupal::cache('render')->invalidate($cid);
-```
-
-The second is subtler, and is what took `cache.data` off the list: reading a key
-to decide whether to correct it. A queued write is invisible to another request's
-read, so it concludes from the absence and writes nothing - and the queued value
-lands afterwards, unopposed.
-
-```php
-// Another request may be about to write this very key.
-if (\Drupal::cache('render')->get($cid) === FALSE) {
-  // ... so this branch runs when it should not have.
-}
-```
-
-Deleting the whole bin, invalidating by cache tag, and plain writing are all
-fine: those are handled. Both risky patterns only bite across requests, and only
-during the window in which a write is still queued.
-
-Grep narrows this down; it cannot settle it. Code reaches a bin three ways, and
-only one of them puts the bin name on the same line as the call:
-
-```php
-\Drupal::cache('render')->delete($cid);      // a grep finds this
-$cache = \Drupal::cache('render');
-$cache->delete($cid);                        // and not this
-$this->cacheRender->delete($cid);            // nor this, the common one
-```
-
-The third is the usual shape in Drupal - core alone has 36 per-key deletes
-against an injected cache backend - so start from what gets a batched bin
-injected, then read those classes:
-
-```bash
-# Services handed one of the batched bins, and direct calls by name.
-grep -rnE 'cache\.(render|menu|dynamic_page_cache)' \
-  web/modules web/themes --include='*.yml'
-grep -rn "Drupal::cache('\(render\|menu\|dynamic_page_cache\)')" \
-  web/modules web/themes
-```
-
-What settles it is watching the wire while the site is used - saving content,
-running cron, submitting the forms your editors submit:
-
-```bash
-redis-cli MONITOR \
-  | grep -E '"(DEL|UNLINK|HDEL)"' \
-  | grep -E ':(render|menu|dynamic_page_cache):'
-```
-
-Anything at all here means that bin comes off the list:
-
-```php
-$settings['redis_rtt_batched_bins'] = ['render', 'dynamic_page_cache'];
-```
-
+The rest of the module is unaffected. What remains is entirely made of
+operations that either group reads that were going to happen anyway, replace a
+multi-command protocol with one Lua call, or avoid a lookup by remembering a
+structural fact - none of which defers anything.
 
 ## Measured results
 
@@ -504,9 +348,8 @@ cache operations rather than a few dozen. 1 ms of latency injected per round
 trip. Traffic is authenticated: a reverse proxy in front of Drupal means the
 anonymous requests that would be cheapest never reach PHP at all.
 
-Three configurations, differing only in `settings.php`: the stock `redis`
-backend, this module with `redis_rtt_batch_writes` off, and this module as it
-ships.
+Two configurations, differing only in `settings.php`: the stock `redis` backend
+and this module as it ships.
 
 ### How these were counted
 
@@ -524,24 +367,25 @@ un-pipelined command and one per `exec()`.
 Because that counter is not free, round trips and wall time were measured in
 separate runs - never the same one. Each figure is the median of three runs.
 
-On the cold scenarios the three runs returned the same count every time. The
-warm ones vary by a trip or two - a warm node view came back as 14, 14 and 16 -
-because what a warm page reads depends on what the previous request left in
-APCu. Those rows are given as ranges below for that reason, and a difference of
-one or two trips between the last two columns there is noise, not batching:
-batching does nothing on a page that writes nothing.
+On the cold scenarios the runs returned the same count every time. The warm ones
+vary by a trip or two - a warm node view came back as 13 and 15 - because what a
+warm page reads depends on what the previous request left in APCu. Those rows
+are given as ranges below for that reason.
 
 ### Round trips
 
-| scenario, authenticated | stock | module, no batching | module |
-|---|---|---|---|
-| view a node, first request after a flush | 818 | 694 | **449** |
-| view a node, cold | 815 | 690 | **445** |
-| content listing, cold | 515 | 447 | **312** |
-| edit form, cold | 322 | 304 | **266** |
-| view a node, warm | 24 | 14-18 | **14-16** |
-| edit form, warm | 61 | 32 | **32** |
-| content listing, warm | 166 | 86 | **86** |
+| scenario, authenticated | stock | module |
+|---|---|---|
+| view a node, cold | 817 | **690-692** (-15%) |
+| content listing, cold | 520 | **447** (-14%) |
+| edit form, cold | 325 | **304** (-6%) |
+| view a node, warm | 24 | **13-15** (-42%) |
+| edit form, warm | 61 | **31** (-49%) |
+| content listing, warm | 166 | **85** (-49%) |
+
+The shape of that table is the argument for dropping batched writes: the warm
+rows, which are the bulk of real traffic, are where this module does most of its
+work, and batching contributed nothing to them.
 
 **"Cold" above means this module's caches are cold, not everything.** The bench
 protocol leaves core's chained-fast front for `cache.config` valid, so the
@@ -552,55 +396,38 @@ time - measured, 279 extra `HGETALL`s. The same page then costs:
 
 | scenario, authenticated | stock | module |
 |---|---|---|
-| view a node, everything cold including core's config front | 1,164-1,168 | **755-759** |
+| view a node, everything cold including core's config front | 1,165 | **1,001** |
 
-Reproduced on two benches and two SAPIs (`php -S` and nginx + php-fpm), within
-±4. Both sides pay about 350 waits more, so the saving is 35% here against 45%
-above - and slightly larger in absolute terms, 409 waits against 370. That block
-is `Drupal\Core\Cache\ChainedFastBackend`, which this module does not replace
-and does not batch: `WriteBatch::handles()` returns FALSE for `config`,
-`bootstrap` and `discovery` because they are chained-fast bins.
+Both sides pay about 350 waits more, so the saving reads as 14% here against 15%
+above while being slightly larger in absolute waits, 164 against 127. That block
+is `Drupal\Core\Cache\ChainedFastBackend`, a core backend this module does not
+replace: `bootstrap`, `config` and `discovery` keep their APCu front and their
+own consistency protocol.
 
 The distinction is worth stating because it is easy to reproduce the wrong one.
 Measuring straight after `drush cr` gives a figure in between - 685 waits with
 this module on the same page - and none of the three is wrong; they are three
 different starting states.
 
-Commands are a different story, and the honest version of it is worse than this
-section used to claim.
+Commands are a different story, and worth stating carefully because the header
+does not measure what it looks like it measures.
 
-The `redis-cmds` field of the report header counts *calls this module makes to
-the client*, which is what its docblock says it counts. It is not what Redis
-executes. An `EVAL` counts as one call however much its script does, and the
-script behind a batched write does `HGET` + `HMSET` + `EXPIRE`. So the `EVAL`
-does not stand in for `HMSET` + `EXPIRE`: it **calls** them, and adds a guard
-`HGET` on top.
+The `redis-cmds` field counts *calls this module makes to the client*, which is
+what its docblock says it counts. It is not what Redis executes: an `EVAL`
+counts as one call however much its script does.
 
-Measured at the server with `CONFIG RESETSTAT` + `INFO commandstats`, and
-cross-checked against `MONITOR`, the cold scenarios execute **more** commands
-with this module, not fewer:
+Measured at the server with `CONFIG RESETSTAT` + `INFO commandstats`, on the
+cold node view, the two configurations are now within a third of a percent of
+each other - 11,221 commands for stock against 11,258 for this module. The
+module asks Redis for essentially the same work; what changed is how many times
+PHP stops to wait for it.
 
-| scenario, authenticated | stock, at the server | module, at the server |
-|---|---|---|
-| view a node, cold | 10,507 | 10,855 (+3.3%) |
-| content listing, cold | 979 | 1,162 (+18.7%) |
-| edit form, cold | 9,880 | 9,909 (+0.3%) |
-| view a node, warm | 36 | 34 (-5.6%) |
-| edit form, warm | 3,182 | 3,161 (-0.7%) |
-| content listing, warm | 231 | 228 (-1.3%) |
-
-So the trade this module makes is not "the same work, less waiting". It is
-**more commands for Redis, far fewer waits for PHP** - which is the right trade
-when a round trip costs a millisecond and a command costs microseconds, and the
-wrong one if Redis is your bottleneck rather than the network. Say it that way
-round; the wall time table below is where the benefit actually shows up.
-
-Batching accounts for the whole difference between the last two columns, and
-only on cold pages: a warm page writes nothing, so there is nothing to batch.
-What it does on a cold page is visible directly - of about 3,400 cache entries
-written, 241 are in batched bins, and those 241 travel in 3 round trips instead
-of 241. The other 3,100 are `cache.entity`, which Drupal already writes in bulk:
-3,109 entries in 91 round trips.
+That was not true of the version that batched writes. There, each queued write
+travelled as an `EVAL` whose script ran `HGET` + `HMSET` + `EXPIRE`, so the
+module executed about 3.3% *more* commands at the server on a cold node view
+and 18.7% more on a cold listing. The trade was explicit - more commands for
+Redis, far fewer waits for PHP - and dropping the batching removed that side of
+it too.
 
 ### Wall time
 
@@ -609,35 +436,32 @@ measured in one sitting, which matters more than it sounds: the same code on the
 same machine gave 6300 ms one night and 7089 ms the next, so a table assembled
 from separate sittings compares the weather rather than the code.
 
-| scenario, authenticated | stock | module, no batching | module |
-|---|---|---|---|
-| content listing, cold | 1429 ms | 1213 ms | **994 ms** (-18%) |
-| view a node, cold | 7263 ms | 7089 ms | **6794 ms** (-4%) |
-| edit form, cold | 2999 ms | 2951 ms | **2876 ms** (-3%) |
-| content listing, warm | 359 ms | — | **230 ms** (-36%) |
-| view a node, warm | — | — | no measurable change |
+| scenario, authenticated | stock | module |
+|---|---|---|
+| content listing, warm | 359 ms | **230 ms** (-36%) |
+| content listing, cold | 1429 ms | **1213 ms** (-15%) |
+| view a node, cold | 7263 ms | **7089 ms** (-2%) |
+| edit form, cold | 2999 ms | **2951 ms** (-2%) |
+| view a node, warm | — | no measurable change |
 
-The saving in time tracks the saving in waits, which is the point: 245 fewer
-waits at 1 ms each is about 295 ms off the cold node view, and 82 fewer is about
-129 ms off the warm listing - measured at 359 ms against 230 ms, medians of
-three runs alternating which configuration went first.
+The warm content listing is the clearest row and deliberately first: 81 fewer
+waits, 129 ms less, medians of three runs alternating which configuration went
+first. A trip on this bench costs about 1.8 ms - 1 ms injected on top of a
+0.76 ms baseline - so the saving and the waits agree in direction and order of
+magnitude, which is as far as that arithmetic should be pushed.
 
-That last row used to read "warm pages: no measurable change", which was wrong
-and understated this module by a third. A warm page writes nothing, so batching
-has nothing to do there - but reading is a different matter, and the round trip
-table above says so plainly: a warm content listing goes from 166 waits to 86. A
-warm node view really is unchanged, because it only spends 24 waits to begin
-with.
+A warm node view really is unchanged: it only spends 24 waits to begin with, so
+there is nothing there to give back.
 
-It is also worth reading the first row against the second. The listing gains
-18%; the node view gains 4% for a larger absolute saving, because that page
+It is also worth reading the cold listing against the cold node view. The
+listing gains 15%; the node view gains 2% for a comparable absolute saving, because that page
 spends seven seconds and most of them are PHP rendering 550 entities. This module
 can only give back time that was spent waiting for Redis. Where that is not where
 the time goes, it has little to offer, and no amount of round trip reduction
 changes that.
 
-**With no injected latency at all, all three configurations are within noise of
-each other.** The saving *is* the cost of the latency and disappears with it. If
+**With no injected latency at all, both configurations are within noise of each
+other.** The saving *is* the cost of the latency and disappears with it. If
 the cache is on localhost, this module is not for you.
 
 ## Troubleshooting
@@ -658,10 +482,8 @@ Point it at `Drupal\redis_rtt\ClientFactory`; see Configuration.
 If round trips dropped but wall time did not, the network is not your
 bottleneck and this module has nothing to offer you.
 
-**A cache entry looks stale or comes back after being deleted.** There are two
-independent mechanisms in this module that can produce that symptom, and they
-have separate switches. Try them in this order, because the second is the
-cheaper test and the more likely cause of *stale* specifically:
+**A cache entry looks stale.** One mechanism in this module can produce that
+symptom, and it has its own switch:
 
 1. Set `redis_rtt_tag_warmset_ttl = 0` and rebuild caches. That stops a cache
    tag counter read ahead of time from answering for its tag at all. Within that
@@ -670,36 +492,23 @@ cheaper test and the more likely cause of *stale* specifically:
    that is already superseded; the stock backend does neither, because it never
    holds a counter for a tag nobody asked for. The cost of turning it off is
    round trips: measured at 18 of the 30 this module saves on a warm edit form.
-2. Set `redis_rtt_batch_writes = FALSE` and rebuild caches. That restores the
-   stock write path exactly. If the symptom goes away here, the bin involved is
-   one the batching should not have taken: name the remaining bins in
-   `redis_rtt_batched_bins` and please open an issue saying which one it was.
-
-If neither changes anything, the cause is not in this module.
-
-**`batches` is high relative to `batched-writes` in the header.** The limit is
-set far below 100. It costs round trips rather than correctness. Note that
-`batches=1` for a handful of writes is the normal reading of a warm page, not a
-symptom.
+If that changes nothing, the cause is not in this module: writes are not
+deferred, so nothing here can resurrect an entry another process deleted.
 
 
 ## FAQ
 
 **Q: Does this module change when my cache writes reach Redis?**
 
-**A:** For three bins, yes; for everything else, no.
+**A:** No. Every write, delete and invalidation goes to Redis at exactly the
+point the stock backend sends it, on every bin.
 
-Writes to `cache.render`, `cache.menu` and `cache.dynamic_page_cache` are held
-in memory and sent in batches - when 100 have accumulated, and again at the end
-of the request. Everything else, and every `delete()` and invalidation, goes to
-Redis at exactly the point the stock backend sends it.
-
-The consequence to understand is that an entry in a batched bin, written on one
-web node, is not readable from another until that batch goes out. Within the
-request that wrote it, a read of a queued key is served from the queue, so a
-request never misses on something it has just written. See **Batched writes**
-for which bins those are, why they were chosen, and what the residual risk is.
-`redis_rtt_batch_writes = FALSE` restores the stock behaviour for all of them.
+Earlier versions did, for three bins, and that is worth knowing if you are
+coming from one of them: writes to `cache.render`, `cache.menu` and
+`cache.dynamic_page_cache` were held in memory and sent in one pipeline. The
+consequence was that an entry written on one web node was not readable from
+another until that batch went out. That is gone; see **Writes** for what it
+bought and why it was dropped anyway.
 
 **Q: Can the render cache shortcut serve the wrong variation?**
 

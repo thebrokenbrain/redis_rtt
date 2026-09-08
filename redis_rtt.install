@@ -38,11 +38,11 @@ function redis_rtt_requirements(string $phase): array {
   // because a site may assign this backend per bin - the heavy ones only, which
   // is a perfectly ordinary thing to do - and reading the default key alone
   // would report a deliberate configuration as "not in use".
-  $batched = [];
+  $served = [];
   try {
     foreach (Cache::getBins() as $bin => $bin_backend) {
-      if (is_a($bin_backend, 'Drupal\redis_rtt\Cache\BatchingRedisBackend')) {
-        $batched[] = $bin;
+      if (is_a($bin_backend, 'Drupal\redis_rtt\Cache\PipeliningRedisBackend')) {
+        $served[] = $bin;
       }
     }
   }
@@ -51,12 +51,12 @@ function redis_rtt_requirements(string $phase): array {
     // also runs where that cannot be done - mid-install, mid-rebuild, or with a
     // container that has not been given the bin list. Fall back to the setting
     // rather than taking the status report down with it.
-    $batched = (Settings::get('cache')['default'] ?? NULL) === 'cache.backend.redis_rtt'
+    $served = (Settings::get('cache')['default'] ?? NULL) === 'cache.backend.redis_rtt'
       ? ['default']
       : [];
   }
-  sort($batched);
-  $backend_active = (bool) $batched;
+  sort($served);
+  $backend_active = (bool) $served;
   $default = Settings::get('cache')['default'] ?? NULL;
   $everywhere = $default === 'cache.backend.redis_rtt';
 
@@ -65,8 +65,8 @@ function redis_rtt_requirements(string $phase): array {
   }
   elseif ($backend_active) {
     $value = t('Active on @count bins (@bins)', [
-      '@count' => count($batched),
-      '@bins' => implode(', ', $batched),
+      '@count' => count($served),
+      '@bins' => implode(', ', $served),
     ]);
   }
   else {
@@ -103,7 +103,7 @@ function redis_rtt_requirements(string $phase): array {
     ],
     'cache_tags.invalidator.checksum' => [
       'class' => 'Drupal\redis_rtt\Cache\PreloadingRedisCacheTagsChecksum',
-      'label' => t('Batched cache tag checksums'),
+      'label' => t('Cache tag checksums in one MGET'),
     ],
     'lock' => [
       'class' => 'Drupal\redis_rtt\Lock\LuaRedisLock',
