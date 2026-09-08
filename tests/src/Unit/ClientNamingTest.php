@@ -8,7 +8,6 @@ use Drupal\Tests\UnitTestCase;
 use Drupal\redis_rtt\Client\CountingClient;
 use Drupal\redis_rtt\Client\PhpRedisRtt;
 use Drupal\redis_rtt\Client\PhpRedisRttFactory;
-use Drupal\redis\Client\PhpRedis;
 
 /**
  * The connection has to be identifiable in the redis module's reports.
@@ -42,7 +41,14 @@ class ClientNamingTest extends UnitTestCase {
     $client = new PhpRedisRtt($this->createMock(\Redis::class));
 
     $this->assertSame('PhpRedisRtt', $client->getName());
-    $this->assertInstanceOf(PhpRedis::class, $client, 'It must still be a phpredis client.');
+    // There used to be an assertInstanceOf(PhpRedis::class) here. It cannot
+    // fail: "class PhpRedisRtt extends PhpRedis" is in the source, PHPStan
+    // proves it, and every static restatement of it - is_subclass_of() with
+    // literals included - is a tautology the analyser reports as one. Silencing
+    // that would be hiding a dead assertion rather than keeping a live guard,
+    // so it is gone. What the inheritance actually buys - the read timeout and
+    // the credentials on the connection - is covered where it can fail, in
+    // \Drupal\Tests\redis_rtt\Kernel\PhpRedisRttConnectionTest.
   }
 
   /**

@@ -16,6 +16,14 @@ parameters:
         -
             identifier: method.notFound
             message: '#Call to an undefined method Drupal\\redis\\ClientInterface::#'
+        # CountingClient is the same facade with a counter around it: it
+        # implements that interface and forwards through its own __call().
+        # This used to be routed into the rule above by annotating the local
+        # variable as the interface, which PHPStan 2 rejects as widening a
+        # narrower native type - and which hid what was really silenced.
+        -
+            identifier: method.notFound
+            message: '#Call to an undefined method Drupal\\redis_rtt\\Client\\CountingClient::#'
         # LuaRedisLockTest::register() swaps the 'lock' service for this
         # module's backend, which is the whole point of the test. Static
         # analysis reads the type off core's default service definition and

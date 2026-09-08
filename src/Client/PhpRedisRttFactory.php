@@ -260,18 +260,26 @@ class PhpRedisRttFactory extends PhpRedisFactory {
   /**
    * Whether this phpredis build accepts a stream context on connect.
    *
-   * The $context parameter landed in phpredis 5.3.0.
+   * The $context parameter landed in phpredis 5.3.0, and the extension version
+   * is what decides it. This used to count the parameters of ::pconnect() by
+   * reflection, which is the wrong instrument: 5.3.4 and 5.3.7 declare three
+   * in their arginfo while accepting all seven at runtime. On those builds the
+   * count came back short, the context was dropped, and with it went
+   * $context['stream'] - which is to say verify_peer and verify_peer_name.
    *
-   * Static because patches/redis/0002 adds a method of the same name to the
-   * parent as static, and PHP refuses to override a static method with an
-   * instance one. Declaring it static here keeps the module working whether or
-   * not that patch is applied - which matters, because the two overlap and
-   * someone will inevitably end up with both.
+   * A TLS connection to a Redis with a private CA then failed outright, and on
+   * a build that did connect it would have been connecting without verifying
+   * the certificate, silently, while the class docblock promised otherwise.
+   * Neither is acceptable from a check nobody could see fail.
+   *
+   * Static so it can be called without an instance; the parent declares no
+   * method of this name, so nothing is being overridden either way.
    */
   protected static function supportsConnectContext(): bool {
     static $supported;
     if ($supported === NULL) {
-      $supported = (new \ReflectionMethod(\Redis::class, 'pconnect'))->getNumberOfParameters() >= 7;
+      $version = phpversion('redis');
+      $supported = $version !== FALSE && version_compare($version, '5.3.0', '>=');
     }
     return $supported;
   }

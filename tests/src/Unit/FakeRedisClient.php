@@ -40,7 +40,7 @@ final class FakeRedisClient implements ClientInterface {
   /**
    * Key/value store. Hashes are arrays, strings are strings.
    *
-   * @var array<string, array<string, string>|string>
+   * @var array<string, array<string, int|string>|int|string>
    */
   public array $data = [];
 

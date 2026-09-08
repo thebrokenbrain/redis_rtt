@@ -221,7 +221,6 @@ class CountingClientTest extends UnitTestCase {
     $inner = $this->createMock(ClientInterface::class);
     $inner->method('__call')->willThrowException(new \RuntimeException('boom'));
     $client = new CountingClient($inner);
-    /** @var \Drupal\redis\ClientInterface $client */
 
     try {
       $client->get('k');

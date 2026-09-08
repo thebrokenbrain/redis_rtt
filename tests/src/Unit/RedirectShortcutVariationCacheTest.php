@@ -425,9 +425,11 @@ class RedirectShortcutVariationCacheTest extends UnitTestCase {
 
     $this->assertNotFalse($cache->get(['element'], $this->initial), 'Warm the memo.');
 
-    // Another process invalidates it: no write happens through this service, so
-    // nothing here knows about it.
-    $this->backend->invalidateAll();
+    // Another process empties the bin: no write happens through this service,
+    // so nothing here knows about it. ::deleteAll() rather than the deprecated
+    // ::invalidateAll(), which is what that deprecation points at; either way
+    // the entry stops answering, which is what the memo must not hide.
+    $this->backend->deleteAll();
 
     $this->assertFalse(
       $cache->get(['element'], $this->initial),
