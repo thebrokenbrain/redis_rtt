@@ -26,13 +26,10 @@ final class Pipeline {
    * another - measured across bins, a cache.render get answering with a
    * cache.entity value.
    *
-   * Closing it costs nothing when Redis is healthy, because this only runs
-   * after a failure, and phpredis reconnects on the next command.
-   *
    * Stock redis never sees this, and not because it handles it: it sets no read
    * timeout at all, so it waits out the stall instead of timing out. The
-   * bounded read this module adds is the right trade - an unbounded one turns a
-   * failover into an outage - but it has to clean up after itself.
+   * bounded read this module adds is the right trade, but it has to clean up
+   * after itself.
    *
    * @param \Drupal\redis\ClientInterface|null $client
    *   The client whose connection failed, if there was one.

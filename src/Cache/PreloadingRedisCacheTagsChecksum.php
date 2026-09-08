@@ -11,62 +11,40 @@ use Drupal\redis\ClientFactory;
 /**
  * Cache tag checksum provider that resolves a request's tags in one MGET.
  *
- * Two problems are being solved here, and the second is the expensive one.
+ * Two problems, and the second is the expensive one.
  *
- * First, the redis 2.x backend calls ::registerCacheTagsForPreload() on the
- * checksum provider after a multi-get, but only when the provider implements
- * that method. Core only ships CacheTagsChecksumPreloadInterface, and the trait
- * code behind it, from 11.2 onwards; on 10.x and on 11.0/11.1 the redis
- * module's provider implements nothing but an empty back-compat marker and the
- * preload hook is dead code. Implementing it lets the first MGET that has to
- * happen anyway also fetch every other tag seen in the same read.
+ * First, the redis 2.x backend calls ::registerCacheTagsForPreload() after a
+ * multi-get, but only when the provider implements it. Core ships the
+ * interface behind that from 11.2 onwards; on 10.x and 11.0/11.1 the redis
+ * module's provider implements nothing and the hook is dead code. Implementing
+ * it lets the first MGET that has to happen anyway fetch every other tag seen
+ * in the same read. From 11.2 core consumes the registered tags itself, so the
+ * property below is simply kept in the shape core expects and neither path
+ * branches on the version.
  *
- * From 11.2 core consumes the registered tags itself, in
- * CacheTagsChecksumTrait::calculateChecksum(), which merges them into the tag
- * list and empties $preloadTags before ::getTagInvalidationCounts() is ever
- * called. Nothing below branches on the core version for that. The property is
- * simply kept in the shape core expects - a plain list of tag names - so that
- * whichever of the two consumes it, the same tags end up in the same MGET, and
- * the half of this class that the version makes no difference to, the learned
- * set, is unaffected either way.
+ * Second, and this is what shows up on the wire: the provider issues a plain
+ * GET whenever a checksum is wanted for a single tag, and that is the common
+ * case. Validating the config entities and discovery caches behind one
+ * authenticated page produces some thirty of those, each its own sequential
+ * round trip, and the preload hook cannot help because nothing has registered
+ * them - they are reached one at a time as the render tree is walked.
  *
- * One consequence of that hand-over is worth stating plainly, because it is a
- * gap and not a guarantee: on 11.2 core merges the registered tags into the
- * requested list *without* re-checking $delayedTags, so a tag registered by a
+ * The fix rests on an observation: the set of tags a request touches is almost
+ * the same every time. config:system.site, routes, entity_types, library_info
+ * are touched by essentially every request. So remember which tags a request
+ * looked at, and on the next one fetch that whole set in the first MGET that
+ * happens.
+ *
+ * This is a batching change, with one exception that is documented on
+ * ::calculateChecksum(): a count fetched before anyone asked for it may answer
+ * for its tag for $settings['redis_rtt_tag_warmset_ttl'] seconds. Everything
+ * else is still read fresh from Redis on every request.
+ *
+ * One upstream gap worth knowing: on 11.2 core merges registered tags into the
+ * requested list without re-checking $delayedTags, so a tag registered by a
  * cache read and only then invalidated inside an open transaction reaches this
- * class as a requested tag, which it does not filter. The pre-invalidation
- * count is then pinned in the static cache for the rest of the process. Stock
- * \Drupal\redis\Cache\RedisCacheTagsChecksum has the same gap on 11.2, so it
- * is upstream rather than something this class introduces, and closing it here
- * would mean re-taking ownership of the mechanism core has just taken over.
- *
- * Second - and this only shows up when you actually watch the wire - the
- * provider issues a plain GET whenever a checksum is wanted for a single tag:
- *
- * @code
- *   if (count($tags) == 1) {
- *     return [$tag => (int) $this->client->get($this->getTagKey($tag))];
- *   }
- * @endcode
- *
- * That is the common case, not the rare one. Validating the config entities and
- * discovery caches behind one authenticated page request produces some thirty
- * of those single-tag lookups, each its own sequential round trip, and the
- * preload hook cannot help because nothing has registered those tags: they are
- * reached one at a time as the render tree is walked.
- *
- * The fix is the observation that the set of tags a request touches is almost
- * the same set every time. Tags like config:system.site, routes, entity_types,
- * library_info or local_task are touched by essentially every request on the
- * site. So: remember which tags a request looked at, and on the next request
- * fetch that whole set in the first MGET that happens. Thirty round trips
- * become one.
- *
- * This is a batching change only. Every checksum is still read fresh from Redis
- * on every request - nothing is cached across requests, no staleness is
- * introduced, and a tag that turns out not to be needed is simply discarded. A
- * tag missing from the learned set costs nothing either: it is fetched on
- * demand exactly as before, and joins the set for next time.
+ * class as a requested tag. Stock RedisCacheTagsChecksum has the same gap
+ * there, so it is not introduced here.
  */
 class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
 
@@ -265,15 +243,9 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
             $this->answeredSpeculatively[] = $tag;
           }
           else {
-            // Expired, and only then discarded. It used to be dropped on first
-            // use as well, which made ::$speculativeTtl bound nothing: the
-            // second lookup of the same tag always went to Redis, whether the
-            // count was a millisecond old or an hour. That cost one round trip
-            // per preloaded tag asked more than once - 61 of them on a warm
-            // content listing, which took this module's saving there from 49%
-            // to 12%. Letting the entry live out its window instead is what the
-            // setting has always claimed to do: "seconds a preloaded checksum
-            // may answer for its tag".
+            // Discarded only once expired. Dropping it on first use instead
+            // would make ::$speculativeTtl bound nothing: the second lookup of
+            // the same tag would go to Redis whatever the window said.
             unset($this->speculative[$tag]);
           }
         }
@@ -394,51 +366,28 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
   /**
    * {@inheritdoc}
    *
-   * A speculative count is kept out of core's static tag cache, so that it can
-   * never outlive the window it was granted.
+   * Keeps a speculative count out of core's static tag cache, so it cannot
+   * outlive the window it was granted.
    *
-   * The distinction matters because ::$speculativeTtl does not, on its own, do
-   * what it looks like it does. It bounds when a count read ahead of time may
-   * be *used*; it does not bound how long the consequence of using it lasts.
-   * Core's
-   * \Drupal\Core\Cache\CacheTagsChecksumTrait::calculateChecksum() folds
-   * whatever ::getTagInvalidationCounts() returns into $this->tagCache, and
-   * nothing empties that until ::reset() or the end of the process. So a count
-   * that was one millisecond too young at the moment it was consulted became
-   * authoritative for the rest of the run - which is exactly the failure the
-   * TTL was introduced to prevent, with its trigger narrowed from "always" to
-   * "a one-second window" but not removed. In a web request that is
-   * milliseconds; in a cron run, a queue worker or a migration it is the whole
-   * run, and an editor's save elsewhere goes unseen for all of it.
+   * ::$speculativeTtl does not do this on its own. It bounds when a count read
+   * ahead of time may be *used*; it does not bound how long the consequence
+   * lasts, because core's CacheTagsChecksumTrait::calculateChecksum() folds
+   * whatever ::getTagInvalidationCounts() returns into $this->tagCache and
+   * nothing empties that until ::reset() or the end of the process. Without
+   * this override, a count that was a millisecond too young when it was
+   * consulted stays authoritative for the rest of the run - milliseconds in a
+   * web request, the whole job in a cron run or a queue worker.
    *
-   * Removing them again afterwards closes that: the calculation still gets the
-   * speculative value, so the round trip it saved stays saved, and once the
-   * window is over the next caller reads the tag from Redis rather than
-   * inheriting a stale answer.
+   * What it does not close is the window itself: inside it the count served is
+   * the one read before another process invalidated the tag, so a calculation
+   * can validate an entry that is already stale, and an entry written then is
+   * stamped with a superseded count - a permanent miss rather than wrong
+   * content, since the counters only rise. The stock provider does neither,
+   * because it never holds a count for a tag nobody asked for.
    *
-   * WHAT THIS COSTS, AND WHAT IT DOES NOT
-   *
-   * The entry stays in ::$speculative until its window expires, so a tag asked
-   * for repeatedly inside that window keeps being answered without a round
-   * trip. That is deliberate, and it is a correction: this method used to be
-   * paired with dropping the speculative entry on first use, which made the TTL
-   * bound nothing and cost a round trip per preloaded tag asked more than once.
-   * Measured, that was 85 round trips against 146 on a warm content listing and
-   * 31 against 42 on a warm edit form - most of what this module saves on a
-   * warm page, spent to be stricter than the setting ever promised.
-   *
-   * What is not closed is the window itself. Inside it the count served is the
-   * one read before another process invalidated the tag, so a calculation can
-   * validate an entry that is already stale, and an entry written during it is
-   * stamped with a count that is already superseded - which makes it a
-   * permanent miss rather than wrong content, since the counters only rise. The
-   * stock backend does neither, because it never holds a count for a tag nobody
-   * asked for. The bound is ::$speculativeTtl and nothing else, so it is a real
-   * exposure of that many seconds, one second by default.
-   *
-   * Set $settings['redis_rtt_tag_warmset_ttl'] = 0 to remove the exposure
-   * entirely, which turns every speculative count into a re-read; measured at
-   * 18 of the 30 round trips this module saves on a warm edit form.
+   * $settings['redis_rtt_tag_warmset_ttl'] = 0 removes the exposure entirely,
+   * at the cost of re-reading every speculative count. README.md has what that
+   * costs in round trips.
    *
    * @param string[] $tags
    *   The tags to checksum.

@@ -11,34 +11,23 @@ use Drupal\redis\ClientInterface;
  * PhpRedis factory that configures the connection the stock one leaves bare.
  *
  * \Drupal\redis\Client\PhpRedisFactory calls pconnect() with nothing but host
- * and port, leaving every other parameter at its default. The consequential one
- * is read_timeout, whose default is *unlimited*: a connection dropped by a
- * failover - the normal outcome of a multi-AZ ElastiCache failover - blocks the
- * PHP-FPM worker until the FPM request timeout rather than failing fast. Under
- * load that turns a thirty-second failover into an exhausted worker pool and
- * a site down for minutes, with nothing in the symptoms pointing at Redis.
+ * and port. The consequential default is read_timeout, which is *unlimited*: a
+ * connection dropped by a failover blocks the PHP-FPM worker until the FPM
+ * request timeout rather than failing fast, which under load turns a thirty
+ * second failover into an exhausted worker pool with nothing in the symptoms
+ * pointing at Redis.
  *
  * So this is robustness rather than speed. It changes nothing when Redis is
- * healthy, and it does not appear in any throughput measurement.
+ * healthy and does not appear in any throughput measurement.
  *
- * Credentials are handed to pconnect()'s stream context rather than sent as an
- * AUTH command, which is where phpredis wants them and keeps them out of the
- * command stream. Note, though, that this does *not* remove the per-request
- * AUTH, contrary to what one might expect: the socket survives between requests
- * but PHP's static state does not, so the client is rebuilt and pconnect()
- * called again on every request, and phpredis reauthenticates even when it
- * reuses the socket. Measured over 101 authenticated requests against a
- * password-protected Redis: one new connection per fifty requests - the socket
- * really is reused - but two AUTHs per request either way.
+ * Credentials go in pconnect()'s stream context rather than as an AUTH command,
+ * which is where phpredis wants them. Note that this does *not* remove the
+ * per-request AUTH: the socket survives between requests but PHP's static state
+ * does not, so the client is rebuilt and pconnect() called again every request,
+ * and phpredis reauthenticates even when it reuses the socket.
  *
- * SELECT is issued unconditionally whenever a database is configured. Skipping
- * it when phpredis reports the connection already on that database - which this
- * used to do, and which this paragraph went on describing after the code
- * stopped - is not the free round trip it looks like: phpredis resets its own
- * bookkeeping to 0 on every pconnect() while the pooled socket stays on
- * whatever database it was left on, so the check compares 0 against 0 and sends
- * nothing. Two sites sharing an FPM pool and a Redis host then read and write
- * each other's databases. See ::connect().
+ * SELECT is issued unconditionally whenever a database is configured; see
+ * ::connect() for why skipping it is not the free round trip it looks like.
  *
  * Recognised keys in $settings['redis.connection'], on top of the stock ones:
  *   - tls: (bool) wrap the connection in TLS, for in-transit encryption.
@@ -49,22 +38,17 @@ use Drupal\redis\ClientInterface;
  *   - retry_interval: (int) milliseconds between connect retries, default 100.
  *   - persistent_id: (string) connection pool identifier.
  *   - user: (string) ACL username, for Redis 6 style authentication.
- *   - verify_peer: (bool) verify the TLS peer, default TRUE when tls is on.
- *   - count_commands: (bool) wrap the client in a round-trip counter.
+ *   - verify_peer: (bool) verify the TLS certificate, default TRUE.
  *
- * Those keys configure the connection to the Redis server. In a Sentinel
- * deployment - 'host' given as a list - they configure the connection to the
- * master, which is the connection every command then travels over, but not the
- * discovery exchange that finds it: that is the parent's, and it reaches each
- * sentinel in turn with a fixed 0.5 second connect timeout, in the clear, and
- * authenticates with the password alone, ignoring 'user'. Its read timeout is
- * the same unbounded default this class exists to replace, so a sentinel that
- * accepts the connection and then goes quiet blocks the worker exactly as a
- * stock Redis connection would. Two further Sentinel caveats worth knowing:
- * what a sentinel returns is an IP address, so 'tls' is then verified against
- * an IP and needs either a certificate carrying that IP or verify_peer FALSE;
- * and 'persistent' pools per host, so a failover opens a new pool rather than
- * reusing the old master's.
+ * Sentinel deployments are handled too. The parent hands the whole Sentinel
+ * case to \Drupal\redis\Client\PhpRedisFactory, which connects with host and
+ * port and nothing else, so timeouts, TLS, ACL user and keepalive were all
+ * dropped on the one topology that fails over most. Resolving the master is
+ * still the parent's job; what comes back is an ordinary host and port and gets
+ * the treatment below. Two caveats: the sentinel query itself still uses the
+ * contrib's connect() and so has no read timeout of its own; and 'persistent'
+ * pools per host, so a failover opens a new pool rather than reusing the old
+ * master's.
  */
 class FastPhpRedisFactory extends PhpRedisFactory {
 
@@ -177,16 +161,12 @@ class FastPhpRedisFactory extends PhpRedisFactory {
       }
     }
 
-    // SELECT unconditionally whenever a database is configured, exactly as the
-    // stock factory does. Skipping it on the strength of ::getDbNum() looked
-    // like a free round trip and is not: phpredis resets its own bookkeeping to
-    // 0 on every pconnect() while the pooled socket stays on whatever database
-    // it was left on, so the comparison reports 0 == 0 and sends nothing. Two
-    // sites sharing an FPM pool and a Redis host - a multisite, or two vhosts -
-    // then read and write each other's databases, which is a site serving
-    // another site's data. Verified against phpredis 6.3.0, where after a
-    // select(5) a fresh pconnect() reports getDbNum() = 0 while CLIENT INFO
-    // reports db=5.
+    // SELECT unconditionally whenever a database is configured. Skipping it
+    // when ::getDbNum() already reports the wanted database is not the free
+    // round trip it looks like: phpredis resets that counter to 0 on every
+    // pconnect() while the pooled socket stays on whatever database it was left
+    // on, so the check compares 0 against 0 and sends nothing. Two sites
+    // sharing an FPM pool and a Redis host then read each other's databases.
     $base = $settings['base'] ?? NULL;
     if ($base !== NULL) {
       $redis->select((int) $base);
@@ -194,16 +174,11 @@ class FastPhpRedisFactory extends PhpRedisFactory {
 
     $redis->setOption(\Redis::OPT_SERIALIZER, \Redis::SERIALIZER_NONE);
     // Detect a half-open connection - the common outcome of an AZ failover -
-    // instead of blocking the worker until the FPM timeout.
-    //
-    // Redundant on phpredis 6.3.0, and knowingly kept: every ::connect() and
-    // ::pconnect() branch above already carries $read_timeout, and measured
-    // here a pconnect() that reuses a pooled socket reapplies it too (a socket
-    // opened with 5.0 reports 0.25 after a second pconnect asking for 0.25).
-    // Removing this line therefore changes nothing observable, which is why no
-    // test asserts on it - a test that appeared to would in fact be asserting
-    // on what ::connect() did. It stays as a safeguard for builds where the
-    // connect parameter is ignored, not as behaviour anything depends on.
+    // instead of blocking the worker until the FPM timeout. Redundant on
+    // phpredis 6.3.0, where every connect branch above already carries the
+    // value and a pconnect() reusing a pooled socket reapplies it; kept as a
+    // safeguard for builds that ignore the connect parameter, and asserted on
+    // by nothing for that reason.
     $redis->setOption(\Redis::OPT_READ_TIMEOUT, $read_timeout);
     if (defined('Redis::OPT_TCP_KEEPALIVE')) {
       $redis->setOption(\Redis::OPT_TCP_KEEPALIVE, 1);
@@ -217,39 +192,28 @@ class FastPhpRedisFactory extends PhpRedisFactory {
    *
    * A non-positive setting means "no limit", which is what phpredis documents
    * and what an operator writing 0 is asking for. It cannot be passed on as
-   * written, though, and the reason is not where this used to say it was.
+   * written: measured on phpredis 6.3.0, ::connect() accepts 0.0 perfectly
+   * well, but ::setOption(OPT_READ_TIMEOUT, 0.0) makes the next read fail with
+   * "socket error on read socket". This class calls both, so a site that set 0
+   * got an HTTP 500 on every page where the stock factory - which calls
+   * neither - served it normally. A negative value is accepted by both and
+   * reaches the unlimited behaviour reliably.
    *
-   * Measured on phpredis 6.3.0, against a real server, in four combinations:
-   * connect() with 0.0 and no setOption() works and reports back 0.0;
-   * connect() with the parameter omitted and setOption(OPT_READ_TIMEOUT, 0.0)
-   * afterwards fails the next read with "socket error on read socket"; so does
-   * passing 0.0 to both; and omitting both works. In other words the connect
-   * parameter accepts zero perfectly well and ::setOption() is what rejects it.
-   * This class calls both, so a site that set 0 got a RedisException on every
-   * request and an HTTP 500 on every page, where the stock factory - which
-   * calls neither - serves the site normally.
+   * Which of the two rejects it is worth knowing, because the fix suggested by
+   * blaming ::connect() is to stop passing the parameter, and that leaves the
+   * ::setOption() call and still takes the site down.
    *
-   * Saying which of the two breaks matters, because the obvious "fix" suggested
-   * by blaming connect() is to stop passing the parameter, and that still
-   * leaves the setOption() call and still takes the site down. A negative value
-   * is accepted by both and reaches the unlimited behaviour reliably, so that
-   * is what a non-positive setting is normalised to.
-   *
-   * \Drupal\Tests\redis_rtt\Kernel\FastPhpRedisConnectionTest asserts this
-   * against a real socket; nothing in tests/src/Unit can, because the double
-   * there replaces ::connect() wholesale.
-   *
-   * Honouring it rather than refusing it is deliberate. An unbounded read is
-   * the failure mode this class exists to avoid, and choosing it throws that
-   * away - but it is an explicit setting, written by someone who wanted the
-   * stock behaviour back, and silently overriding an operator is worse than
-   * letting them have what they asked for.
+   * Honouring the setting rather than refusing it is deliberate: an unbounded
+   * read is the failure mode this class exists to avoid, but it is an explicit
+   * request from an operator who wanted the stock behaviour back.
    *
    * @param array<string, mixed> $settings
    *   The connection settings.
    *
    * @return float
    *   The read timeout, or a negative value meaning no limit.
+   *
+   * @see \Drupal\Tests\redis_rtt\Kernel\FastPhpRedisConnectionTest
    */
   protected function readTimeout(#[\SensitiveParameter] array $settings): float {
     $read_timeout = (float) ($settings['read_timeout'] ?? 1.0);
