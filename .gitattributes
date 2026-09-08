@@ -3,7 +3,11 @@
 #
 # Nothing needed at runtime belongs here: the .services.example.yml is loaded
 # from settings.php on a real site, so it ships.
-/tests              export-ignore
+#
+# /tests is deliberately NOT here. A module whose whole argument is "measure,
+# do not assert" has to let the person who installed it run the measurements,
+# and a release tarball without tests cannot be checked by anyone who did not
+# clone the repository.
 /.gitattributes     export-ignore
 /.gitignore         export-ignore
 /.gitlab-ci.yml     export-ignore

@@ -15,7 +15,7 @@ use Drupal\redis_rtt\Redis\Pipeline;
  * trips for a release, and three more for re-acquiring (extending) a lock the
  * process already holds. Locks sit on the critical path of every
  * \Drupal\Core\Cache\CacheCollector write - state, menu active trail, theme
- * registry, library discovery, path alias whitelist - so those round trips add
+ * registry, library discovery, path alias prefixes - so those round trips add
  * up quickly on a cross-AZ primary.
  *
  * Both operations are compare-and-swap, which is exactly what a Lua script does

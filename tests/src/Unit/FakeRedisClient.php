@@ -21,11 +21,10 @@ use Drupal\redis\ClientInterface;
  * account.
  *
  * The lock scripts do not, and nothing here asserts on their conditions. This
- * used to say they were "exercised against a real Redis in
- * redis_rtt-auditoria/reproducciones/", which was not true: not one of the
- * reproductions there mentioned a lock, so the sentence pointed at a
- * compensating control that did not exist, and six mutations of the lock -
- * ::release() deleting anyone's lock among them - left the whole suite green.
+ * used to claim they were exercised against a real Redis elsewhere, which was
+ * not true: the sentence pointed at a compensating control that did not exist,
+ * and six mutations of the lock - ::release() deleting anyone's lock among
+ * them - left the whole suite green.
  * The cover is now \Drupal\Tests\redis_rtt\Kernel\LuaRedisLockTest, which runs
  * core's lock contract plus the ownership cases against a real Redis. Anything
  * added to the lock scripts belongs there, not here.
