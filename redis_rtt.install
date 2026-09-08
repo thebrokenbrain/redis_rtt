@@ -29,6 +29,33 @@ use Drupal\redis\ClientFactory as RedisClientFactory;
 function redis_rtt_requirements(string $phase): array {
   $requirements = [];
 
+  // --- The redis module's major version ------------------------------------
+  // Checked at install as well as at runtime, and as an error, because getting
+  // this wrong is not a degraded site: every class in src/Cache extends one
+  // that only exists in redis 2.x, so on 1.x the container cannot be built and
+  // every page is a blank 200 with a class-not-found in the log.
+  //
+  // It is easy to get wrong by accident. redis_rtt.info.yml can only say
+  // "redis:redis" - Drupal compares "8.x-1.11" as greater than "2.0", so a
+  // version constraint there does not hold - and composer.json asks for
+  // "^2.0@alpha", which an ordinary `composer require drupal/redis` will not
+  // give you, because 2.0.0-alpha2 is not stable and 1.11.0 is.
+  //
+  // So the class is asked for directly. That is the thing that actually has to
+  // be true, and it stays true however the module arrived on disk.
+  if (!class_exists('Drupal\redis\Cache\RedisBackend')) {
+    $requirements['redis_rtt_redis_version'] = [
+      'title' => t('Redis RTT: redis module version'),
+      'value' => t('Incompatible'),
+      'severity' => REQUIREMENT_ERROR,
+      'description' => t('This module builds on the 2.x branch of the <a href="https://www.drupal.org/project/redis">redis</a> module and cannot run on 1.x: <code>Drupal\redis\Cache\RedisBackend</code> does not exist. Install it with <code>composer require "drupal/redis:^2.0@alpha"</code> - the version suffix is required, because 2.x has no stable release yet and Composer will otherwise resolve to 1.x.'),
+    ];
+
+    // Nothing below can be answered without those classes, and at install this
+    // is the whole answer anyway.
+    return $requirements;
+  }
+
   if ($phase !== 'runtime') {
     return $requirements;
   }
@@ -157,7 +184,10 @@ function redis_rtt_requirements(string $phase): array {
   if ($client === NULL) {
     $connection_notes[] = t('No Redis connection has been made yet this request and no <code>interface</code> is named, so which client is in force cannot be reported from here - it is whichever tagged factory has the highest priority, and that depends on what else is installed. Name it to settle the question: <code>$settings["redis.connection"]["interface"] = "PhpRedisRtt";</code>');
   }
-  elseif (!str_starts_with($client, 'PhpRedisRtt')) {
+  if ($client !== NULL && str_starts_with(strtolower($client), 'predis')) {
+    $connection_notes[] = t('The client is Predis, whose <code>eval()</code> takes its arguments in a different order from phpredis. This module therefore does not send it any Lua, and the two optimisations that depend on scripting - single round-trip cache invalidation and single round-trip lock release - fall back to the same commands the redis module would send. Everything still works; those two savings do not apply. Switch to phpredis to get them.');
+  }
+  if ($client !== NULL && !str_starts_with($client, 'PhpRedisRtt')) {
     $connection_notes[] = t('The connection is @client rather than PhpRedisRtt, so no read timeout is configured. The PHP default is unlimited, which means a connection dropped by a failover blocks the worker until the FPM request timeout.', ['@client' => $client]);
   }
   $requirements['redis_rtt_connection'] = [

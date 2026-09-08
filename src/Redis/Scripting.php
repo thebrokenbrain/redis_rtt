@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Drupal\redis_rtt\Redis;
 
+use Drupal\redis\ClientInterface;
+
 /**
  * Remembers that this connection's Redis will not run Lua.
  *
@@ -39,11 +41,31 @@ final class Scripting {
   /**
    * Whether to skip Lua entirely and use the inherited path.
    *
+   * Two reasons to skip it. One is a Redis that refused a script earlier in
+   * this process. The other is Predis, which the redis module also offers and
+   * which takes eval() in protocol order - script, numkeys, then the keys -
+   * where phpredis and Relay take the keys as one array and numkeys last.
+   * Sending the phpredis shape to Predis puts an array where the key count
+   * goes, Redis answers "value is not an integer", and every page 500s.
+   *
+   * That is worth detecting up front rather than learning from the failure,
+   * because the failure does not look like a refusal and would propagate.
+   *
+   * @param \Drupal\redis\ClientInterface $client
+   *   The connection the script would run on.
+   *
    * @return bool
-   *   TRUE once a refusal has been seen this process.
+   *   TRUE when the script must not be attempted.
    */
-  public static function refused(): bool {
-    return static::$refused;
+  public static function unavailable(ClientInterface $client): bool {
+    if (static::$refused) {
+      return TRUE;
+    }
+
+    // Anchored, not a substring search: "PhpRedisRtt" contains "pRedis", so a
+    // stripos() here matched this module's own client and switched Lua off
+    // for everybody. The suite caught it; the note stays so it is not redone.
+    return str_starts_with(strtolower((string) $client->getName()), 'predis');
   }
 
   /**

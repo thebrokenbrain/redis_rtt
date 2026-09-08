@@ -52,7 +52,7 @@ LUA;
    * {@inheritdoc}
    */
   public function acquire($name, $timeout = 30.0) {
-    if (Scripting::refused()) {
+    if (Scripting::unavailable($this->client)) {
       return parent::acquire($name, $timeout);
     }
     // Insure that the timeout is at least 1 ms.
@@ -94,7 +94,7 @@ LUA;
    *   The lock name.
    */
   public function release($name): void {
-    if (Scripting::refused()) {
+    if (Scripting::unavailable($this->client)) {
       parent::release($name);
       return;
     }
@@ -122,7 +122,7 @@ LUA;
     if (!$this->locks) {
       return;
     }
-    if (Scripting::refused()) {
+    if (Scripting::unavailable($this->client)) {
       parent::releaseAll($lock_id);
       return;
     }

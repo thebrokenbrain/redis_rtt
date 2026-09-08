@@ -20,7 +20,10 @@ final class ScriptRefusingClient implements ClientInterface {
    */
   public int $scriptAttempts = 0;
 
-  public function __construct(protected FakeRedisClient $inner) {}
+  public function __construct(
+    protected FakeRedisClient $inner,
+    protected string $name = 'ScriptRefusing',
+  ) {}
 
   /**
    * {@inheritdoc}
@@ -45,7 +48,7 @@ final class ScriptRefusingClient implements ClientInterface {
    * {@inheritdoc}
    */
   public function getName() {
-    return 'ScriptRefusing';
+    return $this->name;
   }
 
   /**

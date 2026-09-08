@@ -188,7 +188,7 @@ LUA;
 
     // Redis has already refused to run scripts on this connection, so do not
     // ask again: the inherited path sends what stock would have sent.
-    if (Scripting::refused()) {
+    if (Scripting::unavailable($this->client)) {
       parent::invalidateMultiple($cids);
       return;
     }

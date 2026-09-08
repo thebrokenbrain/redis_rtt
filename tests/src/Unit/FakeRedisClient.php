@@ -103,9 +103,9 @@ final class FakeRedisClient implements ClientInterface {
       return $this;
     }
 
-    // phpredis drops an open pipeline when the connection closes, and this
-    // double has to as well: Pipeline::discard() closes on the failure path and
-    // whatever runs next would otherwise see a pipeline nobody opened.
+    // Closing drops an open pipeline in phpredis, and this double has to do the
+    // same: Pipeline::discard() closes on the failure path, and whatever runs
+    // next would otherwise find a pipeline nobody opened.
     if ($name === 'close') {
       $this->piping = FALSE;
       $this->queue = [];

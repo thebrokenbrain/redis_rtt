@@ -106,7 +106,7 @@ class ScriptingFallbackTest extends UnitTestCase {
   /**
    * A refused invalidation still invalidates, through the inherited path.
    *
-   * @covers ::refused
+   * @covers ::unavailable
    * @covers ::markRefused
    */
   public function testInvalidationFallsBackAndStillInvalidates(): void {
@@ -125,7 +125,7 @@ class ScriptingFallbackTest extends UnitTestCase {
   /**
    * Once refused, the script is not attempted again this process.
    *
-   * @covers ::refused
+   * @covers ::unavailable
    */
   public function testTheScriptIsNotRetriedOnceRefused(): void {
     [$backend, $client] = $this->backend();
@@ -142,7 +142,7 @@ class ScriptingFallbackTest extends UnitTestCase {
   /**
    * With scripting available nothing changes: the script still runs.
    *
-   * @covers ::refused
+   * @covers ::unavailable
    */
   public function testTheScriptIsUsedWhenRedisAllowsIt(): void {
     $client = new FakeRedisClient();
@@ -154,8 +154,59 @@ class ScriptingFallbackTest extends UnitTestCase {
 
     $backend->invalidateMultiple(['uno']);
 
-    $this->assertFalse(Scripting::refused(), 'Nothing refused anything.');
+    $this->assertFalse(Scripting::unavailable($client), 'Nothing refused anything.');
     $this->assertFalse($backend->get('uno'));
+  }
+
+  /**
+   * Predis never gets a script, because its eval() takes different arguments.
+   *
+   * Learned the expensive way: sending phpredis's shape to Predis puts an array
+   * where the key count goes, and every page 500s. There is nothing to catch
+   * there - the error does not read as a refusal - so it has to be decided
+   * before the call.
+   *
+   * @covers ::unavailable
+   */
+  public function testPredisIsNeverSentScripts(): void {
+    $client = new ScriptRefusingClient(new FakeRedisClient(), 'Predis');
+    $checksum = $this->createMock(CacheTagsChecksumInterface::class);
+    $checksum->method('isValid')->willReturn(TRUE);
+    $backend = new PipeliningRedisBackend('render', $client, $checksum, new PhpSerialize());
+    $backend->setPrefix('p');
+    $backend->set('uno', 'V1');
+
+    $this->assertTrue(Scripting::unavailable($client));
+
+    $backend->invalidateMultiple(['uno']);
+
+    $this->assertSame(0, $client->scriptAttempts, 'Not even once.');
+    $this->assertFalse($backend->get('uno'), 'And it invalidated anyway.');
+  }
+
+  /**
+   * The module's own client is not mistaken for Predis.
+   *
+   * "PhpRedisRtt" contains "pRedis", so a substring search matched it and
+   * turned Lua off for everybody - which is to say, turned the module off. The
+   * check is anchored now, and this pins it.
+   *
+   * @covers ::unavailable
+   */
+  public function testOwnClientIsNotMistakenForPredis(): void {
+    $inner = new FakeRedisClient();
+    foreach (['PhpRedisRtt', 'PhpRedisRtt (instrumented)', 'PhpRedis', 'Relay'] as $name) {
+      $this->assertFalse(
+        Scripting::unavailable(new ScriptRefusingClient($inner, $name)),
+        "$name must still be sent scripts."
+      );
+    }
+    foreach (['Predis', 'Predis (instrumented)'] as $name) {
+      $this->assertTrue(
+        Scripting::unavailable(new ScriptRefusingClient($inner, $name)),
+        "$name must not be sent scripts."
+      );
+    }
   }
 
 }
