@@ -7,6 +7,7 @@ namespace Drupal\redis_rtt\Cache;
 use Drupal\Core\Cache\CacheBackendInterface;
 use Drupal\redis\Cache\RedisBackend;
 use Drupal\redis_rtt\Redis\Pipeline;
+use Drupal\redis_rtt\Redis\Scripting;
 
 /**
  * Redis cache backend tuned for high round-trip-cost topologies.
@@ -185,6 +186,13 @@ LUA;
       return;
     }
 
+    // Redis has already refused to run scripts on this connection, so do not
+    // ask again: the inherited path sends what stock would have sent.
+    if (Scripting::refused()) {
+      parent::invalidateMultiple($cids);
+      return;
+    }
+
     // One round trip for the whole set, instead of a sequential HGET + HSET per
     // cache ID.
     try {
@@ -198,6 +206,13 @@ LUA;
       // A pipeline of scripts that times out mid-flight leaves the connection
       // reading the previous command's replies. See Pipeline::discard().
       Pipeline::discard($this->client);
+      // A Redis with scripting switched off must not take the site down. Fall
+      // back to what this class inherits, which is what stock does.
+      if (Scripting::refuses($e)) {
+        Scripting::markRefused();
+        parent::invalidateMultiple($cids);
+        return;
+      }
       throw $e;
     }
   }

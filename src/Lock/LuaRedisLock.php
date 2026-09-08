@@ -6,6 +6,7 @@ namespace Drupal\redis_rtt\Lock;
 
 use Drupal\redis\Lock\RedisLock;
 use Drupal\redis_rtt\Redis\Pipeline;
+use Drupal\redis_rtt\Redis\Scripting;
 
 /**
  * Redis lock backend that uses one round trip per operation.
@@ -51,6 +52,9 @@ LUA;
    * {@inheritdoc}
    */
   public function acquire($name, $timeout = 30.0) {
+    if (Scripting::refused()) {
+      return parent::acquire($name, $timeout);
+    }
     // Insure that the timeout is at least 1 ms.
     $timeout = max($timeout, 0.001);
     $key = $this->getKey($name);
@@ -58,7 +62,16 @@ LUA;
 
     if (isset($this->locks[$name])) {
       // Extend a lock we believe we hold: one round trip instead of three.
-      $extended = $this->client->eval(static::EXTEND_LUA, [$key, $id, (int) ($timeout * 1000)], 1);
+      try {
+        $extended = $this->client->eval(static::EXTEND_LUA, [$key, $id, (int) ($timeout * 1000)], 1);
+      }
+      catch (\Exception $e) {
+        if (!Scripting::refuses($e)) {
+          throw $e;
+        }
+        Scripting::markRefused();
+        return parent::acquire($name, $timeout);
+      }
       if (!$extended) {
         unset($this->locks[$name]);
         return FALSE;
@@ -81,9 +94,22 @@ LUA;
    *   The lock name.
    */
   public function release($name): void {
+    if (Scripting::refused()) {
+      parent::release($name);
+      return;
+    }
     unset($this->locks[$name]);
     // One round trip instead of WATCH + GET + MULTI/DEL/EXEC.
-    $this->client->eval(static::RELEASE_LUA, [$this->getKey($name), $this->getLockId()], 1);
+    try {
+      $this->client->eval(static::RELEASE_LUA, [$this->getKey($name), $this->getLockId()], 1);
+    }
+    catch (\Exception $e) {
+      if (!Scripting::refuses($e)) {
+        throw $e;
+      }
+      Scripting::markRefused();
+      parent::release($name);
+    }
   }
 
   /**
@@ -96,7 +122,12 @@ LUA;
     if (!$this->locks) {
       return;
     }
+    if (Scripting::refused()) {
+      parent::releaseAll($lock_id);
+      return;
+    }
     $names = array_keys($this->locks);
+    $held = $this->locks;
     $this->locks = [];
     $id = $lock_id ?: $this->getLockId();
 
@@ -113,6 +144,14 @@ LUA;
       // A pipeline of scripts that times out mid-flight leaves the connection
       // reading the previous command's replies. See Pipeline::discard().
       Pipeline::discard($this->client);
+      if (Scripting::refuses($e)) {
+        Scripting::markRefused();
+        // ::releaseAll() returns early on an empty list, so put back what this
+        // method emptied before handing over.
+        $this->locks = $held;
+        parent::releaseAll($lock_id);
+        return;
+      }
       throw $e;
     }
   }
