@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Drupal\Tests\redis_rtt\Unit;
 
-use Drupal\redis_rtt\Client\FastPhpRedisFactory;
+use Drupal\redis_rtt\Client\PhpRedisRttFactory;
 use Drupal\redis\ClientInterface;
 
 /**
@@ -16,7 +16,7 @@ use Drupal\redis\ClientInterface;
  * which host - testable without a Redis server, a sentinel, or even the
  * phpredis extension.
  */
-final class RecordingFastPhpRedisFactory extends FastPhpRedisFactory {
+final class RecordingPhpRedisRttFactory extends PhpRedisRttFactory {
 
   /**
    * The settings ::connect() was called with, or NULL if it never was.

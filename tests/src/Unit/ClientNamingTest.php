@@ -6,8 +6,8 @@ namespace Drupal\Tests\redis_rtt\Unit;
 
 use Drupal\Tests\UnitTestCase;
 use Drupal\redis_rtt\Client\CountingClient;
-use Drupal\redis_rtt\Client\FastPhpRedis;
-use Drupal\redis_rtt\Client\FastPhpRedisFactory;
+use Drupal\redis_rtt\Client\PhpRedisRtt;
+use Drupal\redis_rtt\Client\PhpRedisRttFactory;
 use Drupal\redis\Client\PhpRedis;
 
 /**
@@ -18,7 +18,7 @@ use Drupal\redis\Client\PhpRedis;
  * connection goes through that: the status report, /admin/reports/redis and
  * `drush redis:info`.
  *
- * Before this was fixed, a connection established by FastPhpRedisFactory - with
+ * Before this was fixed, a connection established by PhpRedisRttFactory - with
  * a read timeout configured, keepalive on and TLS where asked for - announced
  * itself as plain "PhpRedis". Those reports are the only place an operator can
  * confirm which settings are in force, so one that names the wrong client
@@ -36,12 +36,12 @@ class ClientNamingTest extends UnitTestCase {
   /**
    * The fast client identifies itself, not its parent.
    *
-   * @covers \Drupal\redis_rtt\Client\FastPhpRedis::getName
+   * @covers \Drupal\redis_rtt\Client\PhpRedisRtt::getName
    */
   public function testFastClientReportsItsOwnName(): void {
-    $client = new FastPhpRedis($this->createMock(\Redis::class));
+    $client = new PhpRedisRtt($this->createMock(\Redis::class));
 
-    $this->assertSame('FastPhpRedis', $client->getName());
+    $this->assertSame('PhpRedisRtt', $client->getName());
     $this->assertInstanceOf(PhpRedis::class, $client, 'It must still be a phpredis client.');
   }
 
@@ -51,15 +51,15 @@ class ClientNamingTest extends UnitTestCase {
    * Guards the actual regression: the factory used to return the parent's
    * client class, which reported the wrong name however the factory was named.
    *
-   * @covers \Drupal\redis_rtt\Client\FastPhpRedisFactory::getName
+   * @covers \Drupal\redis_rtt\Client\PhpRedisRttFactory::getName
    */
   public function testFactoryAndClientAgree(): void {
-    $factory = new FastPhpRedisFactory();
+    $factory = new PhpRedisRttFactory();
 
-    $this->assertSame('FastPhpRedis', $factory->getName());
+    $this->assertSame('PhpRedisRtt', $factory->getName());
     $this->assertSame(
       $factory->getName(),
-      (new FastPhpRedis($this->createMock(\Redis::class)))->getName(),
+      (new PhpRedisRtt($this->createMock(\Redis::class)))->getName(),
       'The name the factory is selected by must be the name the client reports.',
     );
   }
@@ -73,9 +73,9 @@ class ClientNamingTest extends UnitTestCase {
    * @covers \Drupal\redis_rtt\Client\CountingClient::getName
    */
   public function testInstrumentationIsVisible(): void {
-    $inner = new FastPhpRedis($this->createMock(\Redis::class));
+    $inner = new PhpRedisRtt($this->createMock(\Redis::class));
 
-    $this->assertSame('FastPhpRedis (instrumented)', (new CountingClient($inner))->getName());
+    $this->assertSame('PhpRedisRtt (instrumented)', (new CountingClient($inner))->getName());
   }
 
 }

@@ -20,7 +20,7 @@ use Drupal\Tests\UnitTestCase;
  * Finding the master is still the parent's job. What comes back from it is an
  * ordinary host and port, and this is what has to happen to it afterwards.
  *
- * @coversDefaultClass \Drupal\redis_rtt\Client\FastPhpRedisFactory
+ * @coversDefaultClass \Drupal\redis_rtt\Client\PhpRedisRttFactory
  * @group redis_rtt
  */
 class SentinelConnectionTest extends UnitTestCase {
@@ -62,7 +62,7 @@ class SentinelConnectionTest extends UnitTestCase {
    * @covers ::getClient
    */
   public function testTheMasterIsWhatGetsConnectedTo(): void {
-    $factory = new RecordingFastPhpRedisFactory(['10.0.2.31', 6380]);
+    $factory = new RecordingPhpRedisRttFactory(['10.0.2.31', 6380]);
 
     $factory->getClient([
       'host' => ['sentinel-a:26379', 'sentinel-b:26379'],
@@ -88,13 +88,13 @@ class SentinelConnectionTest extends UnitTestCase {
    * @covers ::getClient
    */
   public function testDiscoveryChangesTheHostAndNothingElse(): void {
-    $sentinel = new RecordingFastPhpRedisFactory(['10.0.2.31', 6380]);
+    $sentinel = new RecordingPhpRedisRttFactory(['10.0.2.31', 6380]);
     $sentinel->getClient([
       'host' => ['sentinel-a:26379', 'sentinel-b:26379'],
       'port' => 26379,
     ] + $this->connectionSettings());
 
-    $direct = new RecordingFastPhpRedisFactory();
+    $direct = new RecordingPhpRedisRttFactory();
     $direct->getClient([
       'host' => '10.0.2.31',
       'port' => 6380,
@@ -117,7 +117,7 @@ class SentinelConnectionTest extends UnitTestCase {
    * @covers ::getClient
    */
   public function testAnUnresolvableMasterFailsLoudly(): void {
-    $factory = new RecordingFastPhpRedisFactory();
+    $factory = new RecordingPhpRedisRttFactory();
 
     try {
       $factory->getClient([
@@ -148,7 +148,7 @@ class SentinelConnectionTest extends UnitTestCase {
    * @dataProvider providerNonPositiveReadTimeouts
    */
   public function testNonPositiveReadTimeoutMeansNoLimit(mixed $configured): void {
-    $factory = new RecordingFastPhpRedisFactory();
+    $factory = new RecordingPhpRedisRttFactory();
 
     $this->assertLessThan(
       0,
@@ -179,7 +179,7 @@ class SentinelConnectionTest extends UnitTestCase {
    * site actually configured, which is the whole point of the setting.
    */
   public function testPositiveReadTimeoutIsPassedThrough(): void {
-    $factory = new RecordingFastPhpRedisFactory();
+    $factory = new RecordingPhpRedisRttFactory();
 
     $this->assertSame(
       0.25,
@@ -195,7 +195,7 @@ class SentinelConnectionTest extends UnitTestCase {
    * a bounded one.
    */
   public function testTheDefaultReadTimeoutIsBounded(): void {
-    $factory = new RecordingFastPhpRedisFactory();
+    $factory = new RecordingPhpRedisRttFactory();
 
     $this->assertSame(
       1.0,

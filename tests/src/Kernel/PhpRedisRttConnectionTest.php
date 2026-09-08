@@ -6,7 +6,7 @@ namespace Drupal\Tests\redis_rtt\Kernel;
 
 use Drupal\KernelTests\KernelTestBase;
 use Drupal\redis\ClientInterface;
-use Drupal\redis_rtt\Client\FastPhpRedisFactory;
+use Drupal\redis_rtt\Client\PhpRedisRttFactory;
 
 /**
  * What ::connect() does to a socket, asserted against a real socket.
@@ -14,7 +14,7 @@ use Drupal\redis_rtt\Client\FastPhpRedisFactory;
  * WHY THIS EXISTS.
  *
  * The unit coverage of this factory goes through
- * \Drupal\Tests\redis_rtt\Unit\RecordingFastPhpRedisFactory, which replaces
+ * \Drupal\Tests\redis_rtt\Unit\RecordingPhpRedisRttFactory, which replaces
  * ::connect() wholesale so the settings-to-host decisions can be tested with
  * no server. That is the right tool for those decisions and the wrong one for
  * these: everything the replaced method does was, in consequence, asserted by
@@ -27,10 +27,10 @@ use Drupal\redis_rtt\Client\FastPhpRedisFactory;
  * phpredis and a real Redis, reading back what the socket ended up configured
  * with rather than what the factory says it passed.
  *
- * @coversDefaultClass \Drupal\redis_rtt\Client\FastPhpRedisFactory
+ * @coversDefaultClass \Drupal\redis_rtt\Client\PhpRedisRttFactory
  * @group redis_rtt
  */
-class FastPhpRedisConnectionTest extends KernelTestBase {
+class PhpRedisRttConnectionTest extends KernelTestBase {
 
   use RedisAvailabilityTrait;
 
@@ -108,7 +108,7 @@ class FastPhpRedisConnectionTest extends KernelTestBase {
    * @covers ::readTimeout
    */
   public function testTheConfiguredReadTimeoutReachesTheSocket(): void {
-    $client = (new FastPhpRedisFactory())->getClient($this->settings(['read_timeout' => 0.25]));
+    $client = (new PhpRedisRttFactory())->getClient($this->settings(['read_timeout' => 0.25]));
 
     $this->assertSame('v', $this->roundTrip($client), 'The connection has to work at all.');
     $this->assertEqualsWithDelta(
@@ -126,7 +126,7 @@ class FastPhpRedisConnectionTest extends KernelTestBase {
    * @covers ::readTimeout
    */
   public function testTheDefaultReadTimeoutReachesTheSocket(): void {
-    $client = (new FastPhpRedisFactory())->getClient($this->settings());
+    $client = (new PhpRedisRttFactory())->getClient($this->settings());
 
     $this->assertEqualsWithDelta(
       1.0,
@@ -152,7 +152,7 @@ class FastPhpRedisConnectionTest extends KernelTestBase {
    * @covers ::readTimeout
    */
   public function testReadTimeoutOfZeroLeavesWorkingConnection(): void {
-    $client = (new FastPhpRedisFactory())->getClient($this->settings(['read_timeout' => 0]));
+    $client = (new PhpRedisRttFactory())->getClient($this->settings(['read_timeout' => 0]));
 
     $this->assertSame(
       'v',
@@ -183,7 +183,7 @@ class FastPhpRedisConnectionTest extends KernelTestBase {
    */
   public function testTheConfiguredDatabaseIsSelectedOnEveryConnection(): void {
     $pool = ['persistent' => TRUE, 'persistent_id' => 'redis_rtt_select_' . getmypid()];
-    $factory = new FastPhpRedisFactory();
+    $factory = new PhpRedisRttFactory();
 
     $key = 'redis_rtt_select_probe';
     $on_five = $factory->getClient($this->settings($pool + ['base' => 5]));

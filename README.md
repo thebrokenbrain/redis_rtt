@@ -111,7 +111,7 @@ $class_loader->addPsr4(
 // "The service ... has a dependency on a non-existent service redis.factory".
 $settings['container_yamls'][] = 'modules/contrib/redis/redis.services.yml';
 
-$settings['redis.connection']['interface'] = 'FastPhpRedis';
+$settings['redis.connection']['interface'] = 'PhpRedisRtt';
 $settings['redis.connection']['persistent'] = TRUE;
 $settings['cache']['default'] = 'cache.backend.redis_rtt';
 $settings['container_yamls'][] = 'modules/contrib/redis_rtt/redis_rtt.services.yml';
@@ -242,7 +242,7 @@ exception, so a site using the redis module's queue backend must raise
 by default - and with `NULL` the queue uses a non-blocking `rpoplpush`, so a
 site that has never set it is not exposed at all. Do not read the `30` in
 `claimItem($lease_time = 30)` as the figure to beat: that is how long a claimed
-item stays leased, not how long the call blocks. Selecting `FastPhpRedis` is
+item stays leased, not how long the call blocks. Selecting `PhpRedisRtt` is
 therefore an explicit choice: installing this module does not make it for you.
 
 `redis_rtt_report` only emits the header; the `redis-trips`, `redis-cmds` and
@@ -262,7 +262,7 @@ Deploy in stages and measure between them. Set `redis_rtt_report` and
 compare the `X-Redis-RTT` header on your heaviest authenticated routes against
 an instance without the module.
 
-1. Connection settings only: `FastPhpRedis`, `persistent`, timeouts.
+1. Connection settings only: `PhpRedisRtt`, `persistent`, timeouts.
 1. Cache tag checksums and locks.
 1. The cache backend.
 1. The render cache redirect shortcut.
@@ -474,7 +474,7 @@ report names exactly which pieces are not wired up.
 bootstrap.** The `$class_loader->addPsr4()` call is missing from
 `settings.php`, or its path does not match where the module actually lives.
 
-**`Invalid interface FastPhpRedis`.** The bootstrap container is using the redis
+**`Invalid interface PhpRedisRtt`.** The bootstrap container is using the redis
 module's own `ClientFactory`, which does not know about this module's client.
 Point it at `Drupal\redis_rtt\ClientFactory`; see Configuration.
 

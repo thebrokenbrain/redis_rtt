@@ -5,14 +5,14 @@ declare(strict_types=1);
 namespace Drupal\redis_rtt;
 
 use Drupal\redis_rtt\Client\CountingPhpRedisFactory;
-use Drupal\redis_rtt\Client\FastPhpRedisFactory;
+use Drupal\redis_rtt\Client\PhpRedisRttFactory;
 use Drupal\redis\Client\PhpRedisFactory;
 use Drupal\redis\Client\PredisFactory;
 use Drupal\redis\Client\RelayFactory;
 use Drupal\redis\ClientFactory as RedisClientFactory;
 
 /**
- * Client factory that knows about FastPhpRedis before the container exists.
+ * Client factory that knows about PhpRedisRtt before the container exists.
  *
  * Named for what it is rather than for the module, so that
  * $settings['bootstrap_container_definition'] reads clearly. The parent is
@@ -28,12 +28,12 @@ use Drupal\redis\ClientFactory as RedisClientFactory;
  * since it is what lets Drupal read its compiled container out of Redis - makes
  * a Redis connection before any module's namespace is registered and before the
  * real container exists. With the stock factory that connection is the bare
- * one: 'FastPhpRedis' is not in the hardcoded list, so naming it in
+ * one: 'PhpRedisRtt' is not in the hardcoded list, so naming it in
  * $settings['redis.connection']['interface'] throws \InvalidArgumentException
  * and leaving it unset gets the stock PhpRedis.
  *
  * Registering the factories in the constructor is what fixes that: the parent's
- * fallback never runs, so 'FastPhpRedis' resolves during bootstrap and the
+ * fallback never runs, so 'PhpRedisRtt' resolves during bootstrap and the
  * container cache is read over a connection with credentials, timeouts and
  * keepalive configured.
  *
@@ -52,15 +52,15 @@ use Drupal\redis\ClientFactory as RedisClientFactory;
  * $class_loader->addPsr4('Drupal\\redis_rtt\\', __DIR__ . '/../../modules/contrib/redis_rtt/src');
  * @endcode
  *
- * @see \Drupal\redis_rtt\Client\FastPhpRedisFactory
+ * @see \Drupal\redis_rtt\Client\PhpRedisRttFactory
  */
 class ClientFactory extends RedisClientFactory {
 
   public function __construct() {
-    // FastPhpRedis first, so it also wins when no interface is named.
+    // PhpRedisRtt first, so it also wins when no interface is named.
     // The stock factories stay registered so every documented value of
     // $settings['redis.connection']['interface'] keeps resolving.
-    $this->addFactory(new FastPhpRedisFactory());
+    $this->addFactory(new PhpRedisRttFactory());
     $this->addFactory(new PhpRedisFactory());
     $this->addFactory(new PredisFactory());
     $this->addFactory(new RelayFactory());

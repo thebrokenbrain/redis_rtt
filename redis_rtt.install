@@ -134,7 +134,7 @@ function redis_rtt_requirements(string $phase): array {
   // \Drupal\redis\ClientFactory takes the highest-priority tagged factory,
   // which is this module's whenever the module is installed, so reading the
   // setting alone called a correctly configured site misconfigured. The client
-  // knows which one it is - that is what \Drupal\redis_rtt\Client\FastPhpRedis
+  // knows which one it is - that is what \Drupal\redis_rtt\Client\PhpRedisRtt
   // exists for - so ask it.
   $connection = Settings::get('redis.connection', []);
   $persistent = !empty($connection['persistent']);
@@ -155,10 +155,10 @@ function redis_rtt_requirements(string $phase): array {
     $connection_notes[] = t('Persistent connections are off. Every request pays a fresh TCP (and TLS) handshake, which is several round trips before any work happens.');
   }
   if ($client === NULL) {
-    $connection_notes[] = t('No Redis connection has been made yet this request and no <code>interface</code> is named, so which client is in force cannot be reported from here - it is whichever tagged factory has the highest priority, and that depends on what else is installed. Name it to settle the question: <code>$settings["redis.connection"]["interface"] = "FastPhpRedis";</code>');
+    $connection_notes[] = t('No Redis connection has been made yet this request and no <code>interface</code> is named, so which client is in force cannot be reported from here - it is whichever tagged factory has the highest priority, and that depends on what else is installed. Name it to settle the question: <code>$settings["redis.connection"]["interface"] = "PhpRedisRtt";</code>');
   }
-  elseif (!str_starts_with($client, 'FastPhpRedis')) {
-    $connection_notes[] = t('The connection is @client rather than FastPhpRedis, so no read timeout is configured. The PHP default is unlimited, which means a connection dropped by a failover blocks the worker until the FPM request timeout.', ['@client' => $client]);
+  elseif (!str_starts_with($client, 'PhpRedisRtt')) {
+    $connection_notes[] = t('The connection is @client rather than PhpRedisRtt, so no read timeout is configured. The PHP default is unlimited, which means a connection dropped by a failover blocks the worker until the FPM request timeout.', ['@client' => $client]);
   }
   $requirements['redis_rtt_connection'] = [
     'title' => t('Redis RTT: Redis connection'),

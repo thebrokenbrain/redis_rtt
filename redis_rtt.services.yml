@@ -12,7 +12,7 @@ services:
 
   # ---------------------------------------------------------------------------
   # Connection factory that keeps AUTH/SELECT off the per-request path.
-  # Select it with $settings['redis.connection']['interface'] = 'FastPhpRedis';
+  # Select it with $settings['redis.connection']['interface'] = 'PhpRedisRtt';
   #
   # The priority is deliberately below the redis module's own 20. When no
   # interface is named, \Drupal\redis\ClientFactory takes the highest-priority
@@ -23,7 +23,7 @@ services:
   # client stays an explicit act.
   # ---------------------------------------------------------------------------
   redis_rtt.redis_factory.phpredis:
-    class: Drupal\redis_rtt\Client\FastPhpRedisFactory
+    class: Drupal\redis_rtt\Client\PhpRedisRttFactory
     tags:
       - { name: redis_client_factory, priority: 10 }
 

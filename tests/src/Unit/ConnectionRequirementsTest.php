@@ -17,7 +17,7 @@ use Drupal\redis\ClientFactory;
  * in force. It used to answer from $settings['redis.connection']['interface']
  * alone, which is not where that answer lives. With no interface named the
  * client is chosen by tagged service priority instead - a documented, supported
- * configuration - so a site running FastPhpRedis exactly as intended was told
+ * configuration - so a site running PhpRedisRtt exactly as intended was told
  * it was not, and a check that cries wolf about a correct configuration gets
  * configurations "fixed" until it stops.
  *
@@ -81,10 +81,10 @@ class ConnectionRequirementsTest extends UnitTestCase {
    * @covers ::redis_rtt_requirements
    */
   public function testTheConnectionInUseIsWhatGetsReported(): void {
-    $requirement = $this->connectionRequirement(['persistent' => TRUE], 'FastPhpRedis');
+    $requirement = $this->connectionRequirement(['persistent' => TRUE], 'PhpRedisRtt');
 
     $this->assertSame(REQUIREMENT_OK, $requirement['severity']);
-    $this->assertStringContainsString('FastPhpRedis', (string) $requirement['value']);
+    $this->assertStringContainsString('PhpRedisRtt', (string) $requirement['value']);
   }
 
   /**
@@ -95,7 +95,7 @@ class ConnectionRequirementsTest extends UnitTestCase {
   public function testAnInstrumentedConnectionStillCounts(): void {
     $requirement = $this->connectionRequirement(
       ['persistent' => TRUE, 'count_commands' => TRUE],
-      'FastPhpRedis (instrumented)',
+      'PhpRedisRtt (instrumented)',
     );
 
     $this->assertSame(REQUIREMENT_OK, $requirement['severity']);
@@ -110,7 +110,7 @@ class ConnectionRequirementsTest extends UnitTestCase {
    */
   public function testTheSettingDoesNotOverrideWhatWasActuallyBuilt(): void {
     $requirement = $this->connectionRequirement(
-      ['persistent' => TRUE, 'interface' => 'FastPhpRedis'],
+      ['persistent' => TRUE, 'interface' => 'PhpRedisRtt'],
       'PhpRedis',
     );
 
@@ -144,7 +144,7 @@ class ConnectionRequirementsTest extends UnitTestCase {
    */
   public function testTheNamedInterfaceAnswersWhenNothingHasConnected(): void {
     $requirement = $this->connectionRequirement(
-      ['persistent' => TRUE, 'interface' => 'FastPhpRedis'],
+      ['persistent' => TRUE, 'interface' => 'PhpRedisRtt'],
       NULL,
     );
 
@@ -157,14 +157,14 @@ class ConnectionRequirementsTest extends UnitTestCase {
    * @covers ::redis_rtt_requirements
    */
   public function testPersistenceIsReportedAlongsideTheClient(): void {
-    $requirement = $this->connectionRequirement(['persistent' => FALSE], 'FastPhpRedis');
+    $requirement = $this->connectionRequirement(['persistent' => FALSE], 'PhpRedisRtt');
 
     $this->assertSame(REQUIREMENT_WARNING, $requirement['severity']);
     $this->assertStringContainsString(
       'Persistent connections are off',
       (string) $requirement['description']['#items'][0],
     );
-    $this->assertStringContainsString('FastPhpRedis', (string) $requirement['value']);
+    $this->assertStringContainsString('PhpRedisRtt', (string) $requirement['value']);
   }
 
 }

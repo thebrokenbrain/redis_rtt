@@ -50,7 +50,7 @@ use Drupal\redis\ClientInterface;
  * pools per host, so a failover opens a new pool rather than reusing the old
  * master's.
  */
-class FastPhpRedisFactory extends PhpRedisFactory {
+class PhpRedisRttFactory extends PhpRedisFactory {
 
   /**
    * {@inheritdoc}
@@ -58,7 +58,7 @@ class FastPhpRedisFactory extends PhpRedisFactory {
   public function getName(): string {
     // Registered under its own name so it can coexist with the stock factory
     // and be selected explicitly through the 'interface' connection setting.
-    return 'FastPhpRedis';
+    return 'PhpRedisRtt';
   }
 
   /**
@@ -184,7 +184,7 @@ class FastPhpRedisFactory extends PhpRedisFactory {
       $redis->setOption(\Redis::OPT_TCP_KEEPALIVE, 1);
     }
 
-    return new FastPhpRedis($redis);
+    return new PhpRedisRtt($redis);
   }
 
   /**
@@ -213,7 +213,7 @@ class FastPhpRedisFactory extends PhpRedisFactory {
    * @return float
    *   The read timeout, or a negative value meaning no limit.
    *
-   * @see \Drupal\Tests\redis_rtt\Kernel\FastPhpRedisConnectionTest
+   * @see \Drupal\Tests\redis_rtt\Kernel\PhpRedisRttConnectionTest
    */
   protected function readTimeout(#[\SensitiveParameter] array $settings): float {
     $read_timeout = (float) ($settings['read_timeout'] ?? 1.0);

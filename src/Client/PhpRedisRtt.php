@@ -11,7 +11,7 @@ use Drupal\redis\Client\PhpRedis;
  *
  * Exists purely so the connection is identifiable. \Drupal\redis\ClientFactory
  * asks the *client* for its name, not the factory, so a connection established
- * by FastPhpRedisFactory still announced itself as "PhpRedis" everywhere the
+ * by PhpRedisRttFactory still announced itself as "PhpRedis" everywhere the
  * redis module reports it: the status report, /admin/reports/redis and
  * `drush redis:info`.
  *
@@ -23,13 +23,13 @@ use Drupal\redis\Client\PhpRedis;
  *
  * The name is display-only in the redis module; nothing branches on it.
  */
-class FastPhpRedis extends PhpRedis {
+class PhpRedisRtt extends PhpRedis {
 
   /**
    * {@inheritdoc}
    */
   public function getName() {
-    return 'FastPhpRedis';
+    return 'PhpRedisRtt';
   }
 
 }
