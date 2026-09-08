@@ -131,6 +131,14 @@ class RedisRttCacheTest extends GenericCacheBackendUnitTestBase {
 
   /**
    * Invalidating a whole bin removes it, which is the module's default.
+   *
+   * Marked legacy for the same reason ::testInvalidateAll() is: it calls
+   * invalidateAll(), deprecated in drupal:11.2.0, on purpose, because that is
+   * the API whose optimisation is under test. Without the marker the Symfony
+   * deprecation helper fails the run, and a suite that prints OK while exiting
+   * non-zero is a suite whose exit code carries no information.
+   *
+   * @group legacy
    */
   public function testInvalidateAllOptimized(): void {
     $this->setSetting('redis_invalidate_all_as_delete', TRUE);
