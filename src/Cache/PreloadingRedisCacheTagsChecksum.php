@@ -122,12 +122,20 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
   protected const WARM_SET_KEY = 'tagset';
 
   /**
-   * Upper bound on how many tags are preloaded.
+   * Upper bound on how many tags the *learned set* carries.
    *
-   * One MGET of a few hundred keys is a single round trip and a few kilobytes
-   * of reply; that is a good trade against thirty sequential round trips. The
-   * bound exists so a site with unbounded tag churn cannot grow it without
-   * limit.
+   * It bounds ::warmSet() and nothing else. It does **not** bound the MGET:
+   * that also carries ::$preloadTags, which is one tag per entry the read
+   * pipeline returned and is limited only by how much the page reads. Measured
+   * on a warm authenticated node page, the learned set arrived as the 401 keys
+   * this setting allows and the registered tags as 2,736 more, for 320 KB in
+   * one request. The docblock here used to describe the bound as covering all
+   * of it, which is the number an operator would size a network budget with.
+   *
+   * The trade is still the one the class is for - 2,736 keys in one round trip
+   * against 2,736 round trips - and within a request the count is bounded by
+   * the page, so nothing grows without end. But it is bounded by the page, not
+   * by this.
    */
   protected int $limit;
 

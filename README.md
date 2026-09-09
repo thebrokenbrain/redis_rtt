@@ -206,7 +206,7 @@ $settings['bootstrap_container_definition'] = [
 | `redis_rtt_redirect_shortcut_ttl` | `86400` | Lifetime of a learned mapping, in seconds. |
 | `redis_rtt_chain_memo_limit` | `1000` | Maximum render cache chains memoised in one request. |
 | `redis_rtt_shortcut_memo_limit` | `1000` | Maximum learned mappings held in one process. Matters most with APCu off, where that memo is the whole store. |
-| `redis_rtt_tag_warmset_limit` | `400` | Maximum cache tags preloaded in one `MGET`. |
+| `redis_rtt_tag_warmset_limit` | `400` | Maximum cache tags carried by the *learned* set. It does not bound the `MGET` as a whole, which also carries one tag per entry the page read. |
 | `redis_rtt_tag_warmset_min_hits` | `3` | Requests a tag must appear in before it is preloaded. |
 | `redis_rtt_tag_warmset_ttl` | `1.0` | Seconds a preloaded checksum may answer for its tag. Inside that window this module can serve an entry another process just invalidated; `0` removes the window. See Troubleshooting. |
 | `redis_rtt_report` | `FALSE` | Emit the `X-Redis-RTT` measurement header. |
@@ -231,26 +231,34 @@ on failure for that reason; phpredis reconnects on the next command.
 The connection accepts these on top of the redis module's own: `tls`, `timeout`,
 `read_timeout`, `retry_interval`, `persistent_id`, `user`, `verify_peer`.
 
-`read_timeout` defaults to 5 seconds where stock phpredis waits forever, which
-is the point: an unbounded read turns a failover into an outage. It is worth
-being concrete about what that trade buys and costs, because it is the one
-setting here that changes what a visitor sees.
+`read_timeout` defaults to 5 seconds, where the stock factory configures none
+and leaves phpredis on php.ini's `default_socket_timeout` - 60 seconds out of
+the box. That is the point: with Redis unreachable rather than slow, a worker
+held for a minute per request empties the pool. It is worth being concrete
+about what the trade buys and costs, because it is the one setting here that
+changes what a visitor sees.
 
 A stall shorter than the timeout costs nothing either way. A stall longer than
 it fails requests fast here and holds a worker there, and which of those is
 better depends on whether you would rather shed a request or queue behind a
-stalled Redis until PHP gives up. With Redis unreachable rather than slow, stock
-holds its worker for two minutes.
+stalled Redis until PHP gives up.
 
-The default was 1 second until 2026-09-09. Measured at that value, with Redis
-alive but not answering for four seconds and six PHP-FPM workers, stock served
-every request taking up to 4.2 s while this module failed a portion of them
-within about 2 s; neither served wrong content and both recovered fully. A
-second turned out to be aggressive for a cache read across a network hop - a
-garbage collection pause or a failover fits inside it - so the default is now
-five, which does not trip on a stall of that length at all. The behaviour at
-five seconds has not been measured under load; what is measured is the
-behaviour at one, and it is why the number changed.
+The default was 1 second until 2026-09-09. Measured with Redis alive but not
+answering for four seconds and six PHP-FPM workers, a one-second limit failed
+12 of 60 requests where stock served all 60, slowly; at five seconds none of
+the 60 failed, and none failed at a two-second stall either. A second turned
+out to be aggressive for a cache read across a network hop, since a garbage
+collection pause or a failover fits inside it. With Redis unreachable and
+packets dropped rather than refused, this module gave up after 2.18 s and stock
+after 120.18 s.
+
+**Setting it to 0 or less asks for the stock behaviour**, which is
+`default_socket_timeout` and not "no limit": that is what the stock factory
+leaves in force, and it is what you get here. **A value that is not a number is
+refused** and the default stands, with the status report showing it as a
+problem - a decimal comma, an empty string, and a `getenv()` for a variable
+that is not set all used to pass through a cast as 0 and silently remove the
+bound.
 
 It is a limit on *every* reply, including ones you are deliberately waiting
 for.
@@ -324,10 +332,29 @@ this; if it cannot, comment out `bootstrap_container_definition`, clear caches,
 and put it back.
 
 **Nothing works and you want out now.** Set
-`$settings['cache']['default'] = 'cache.backend.redis'` and comment out the two
-`redis_rtt` `container_yamls` lines. The stock backend reads the entries this
-module wrote and vice versa - the formats are identical - so there is no
-migration and no cold start.
+`$settings['cache']['default'] = 'cache.backend.redis'`, comment out the two
+`redis_rtt` `container_yamls` lines, and **put the redis module's own
+`example.services.yml` back in their place** if it is not already listed:
+
+```php
+$settings['cache']['default'] = 'cache.backend.redis';
+// $settings['container_yamls'][] = 'modules/contrib/redis_rtt/redis_rtt.services.yml';
+// $settings['container_yamls'][] = 'modules/contrib/redis_rtt/redis_rtt.services.example.yml';
+$settings['container_yamls'][] = 'modules/contrib/redis/example.services.yml';
+```
+
+That last line is the one that is easy to miss and the one that decides whether
+this is free. `redis_rtt.services.example.yml` is where the cache tag checksum
+service is replaced; commenting it out without putting something back does not
+return the redis module's checksum provider, it returns **core's, on the
+database**. The tag counters stay in Redis, the `cachetags` table is empty, and
+every entry carrying a cache tag - which in Drupal is very nearly everything -
+reads as invalid. The entries are still in Redis; nobody answers with them.
+That is a full cold start, at the exact moment you were trying to avoid one.
+
+With that line in place there is no migration and no cold start: the stock
+backend reads the entries this module wrote and vice versa, because the formats
+are identical.
 
 
 ## How it works
@@ -533,11 +560,12 @@ the cache is on localhost, this module is not for you.
 **A queue worker dies with `read error on connection`.** The bounded read
 timeout applies to every command on the connection, including the blocking
 `brpoplpush` that `Drupal\redis\Queue\RedisQueue::claimItem()` uses when
-`$settings['redis.connection']['reserve_timeout']` is set. If the queue waits
-longer than the read timeout, phpredis raises - and the message says nothing
-about which setting caused it. Keep `reserve_timeout` below
-`read_timeout` (5 seconds by default), or leave `reserve_timeout` unset so the
-queue polls instead of blocking.
+`$settings['redis_queue_<name>']['reserve_timeout']` is set - per queue, and
+named after the queue, not under `redis.connection`. If the queue waits longer
+than the read timeout, phpredis raises, and the message says nothing about
+which setting caused it. Keep that queue's `reserve_timeout` below
+`read_timeout` (5 seconds by default), or leave it unset so the queue polls
+with a non-blocking `rpoplpush` instead of blocking.
 
 **The status report says parts are inactive.** The module needs
 `settings.php` configuration to do anything; see Configuration. The status
