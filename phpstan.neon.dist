@@ -13,9 +13,15 @@ parameters:
         # every Redis command is a magic method, and no amount of annotation
         # makes them statically resolvable. The redis module itself has the
         # same situation.
+        #
+        # Named one by one rather than left open. Open, this covered any Redis
+        # command at all: renaming hgetall to hgetallx still produced "No
+        # errors", so the one check that could catch a mistyped command was
+        # answering for every possible one. The list is the module's whole
+        # vocabulary, and adding a command means adding it here.
         -
             identifier: method.notFound
-            message: '#Call to an undefined method Drupal\\redis\\ClientInterface::#'
+            message: '#Call to an undefined method Drupal\\redis\\ClientInterface::(close|eval|exec|get|getOption|hgetall|mget|multi|pipeline|select|set|ttl)\(\)#'
         # CountingClient is the same facade with a counter around it: it
         # implements that interface and forwards through its own __call().
         # This used to be routed into the rule above by annotating the local
@@ -23,7 +29,7 @@ parameters:
         # narrower native type - and which hid what was really silenced.
         -
             identifier: method.notFound
-            message: '#Call to an undefined method Drupal\\redis_rtt\\Client\\CountingClient::#'
+            message: '#Call to an undefined method Drupal\\redis_rtt\\Client\\CountingClient::(close|eval|exec|get|getOption|hgetall|mget|multi|pipeline|select|set|ttl)\(\)#'
         # LuaRedisLockTest::register() swaps the 'lock' service for this
         # module's backend, which is the whole point of the test. Static
         # analysis reads the type off core's default service definition and

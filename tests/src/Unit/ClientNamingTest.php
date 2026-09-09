@@ -84,4 +84,29 @@ class ClientNamingTest extends UnitTestCase {
     $this->assertSame('PhpRedisRtt (instrumented)', (new CountingClient($inner))->getName());
   }
 
+  /**
+   * The count_commands setting wraps the client; its absence leaves it alone.
+   *
+   * Nothing checked this. The wrapper is the instrument every round-trip figure
+   * in the README and the guide was measured with, so an instrument that
+   * quietly stopped instrumenting would not have made a test fail - it would
+   * have made every published number wrong.
+   *
+   * @covers \Drupal\redis_rtt\Client\PhpRedisRttFactory::instrument
+   */
+  public function testCountCommandsWrapsTheClient(): void {
+    $factory = new PhpRedisRttFactory();
+    $instrument = (new \ReflectionObject($factory))->getMethod('instrument');
+    $instrument->setAccessible(TRUE);
+    $inner = new PhpRedisRtt($this->createMock(\Redis::class));
+
+    $plain = $instrument->invoke($factory, $inner, []);
+    $this->assertSame($inner, $plain, 'Without the setting, nothing is wrapped.');
+
+    $counted = $instrument->invoke($factory, $inner, ['count_commands' => TRUE]);
+    $this->assertNotSame($inner, $counted, 'With it, the client is wrapped.');
+    $this->assertInstanceOf(CountingClient::class, $counted);
+    $this->assertSame('PhpRedisRtt (instrumented)', $counted->getName());
+  }
+
 }
