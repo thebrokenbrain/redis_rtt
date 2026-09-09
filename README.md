@@ -113,10 +113,12 @@ $class_loader->addPsr4(
 // "The service ... has a dependency on a non-existent service redis.factory".
 $settings['container_yamls'][] = 'modules/contrib/redis/redis.services.yml';
 
-// Where Redis is. These default to 127.0.0.1 and 6379, which is almost never
-// what a site this module is for actually has: the whole premise here is a
-// Redis that is a network hop away.
-$settings['redis.connection']['host'] = '10.0.2.31';
+// Where Redis is. CHANGE THIS. It defaults to 127.0.0.1, which is almost never
+// what a site this module is for actually has - the whole premise here is a
+// Redis that is a network hop away - and the installer will not tell you: core
+// swaps the cache backends for in-memory ones while it runs, so `drush si`
+// finishes with "Installation complete" and the first real request is a 500.
+$settings['redis.connection']['host'] = 'redis.example.com';
 $settings['redis.connection']['port'] = 6379;
 
 $settings['redis.connection']['interface'] = 'PhpRedisRtt';

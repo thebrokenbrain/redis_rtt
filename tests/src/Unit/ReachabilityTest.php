@@ -203,4 +203,42 @@ class ReachabilityTest extends UnitTestCase {
     $this->assertSame($expected, $method->invoke(NULL));
   }
 
+  /**
+   * Each bin gets a store of its own, keyed under its own APCu prefix.
+   *
+   * The factory test above pins that a cache is built and memoised per bin, but
+   * not what is inside it. The one line that chooses the store could be made to
+   * hand every bin the 'render' one, and then four bins share a key space in a
+   * segment they also share with the class loader: what one bin learned another
+   * would read back as its own. Nothing failed.
+   *
+   * @covers \Drupal\redis_rtt\Cache\RedirectShortcutVariationCacheFactory::get
+   */
+  public function testEachBinGetsItsOwnStore(): void {
+    $backends = $this->createMock(CacheFactoryInterface::class);
+    $backends->method('get')->willReturn(new MemoryBackend($this->time));
+    $factory = new RedirectShortcutVariationCacheFactory(
+      new RequestStack(),
+      $backends,
+      $this->createMock(CacheContextsManager::class)
+    );
+
+    $prefijo = static function (object $cache): string {
+      $store = (new \ReflectionObject($cache))->getProperty('store');
+      $store->setAccessible(TRUE);
+      $inner = $store->getValue($cache);
+      $prefix = (new \ReflectionObject($inner))->getProperty('prefix');
+      $prefix->setAccessible(TRUE);
+
+      return (string) $prefix->getValue($inner);
+    };
+
+    $render = $prefijo($factory->get('render'));
+    $dynamic = $prefijo($factory->get('dynamic_page_cache'));
+
+    $this->assertNotSame($render, $dynamic, 'Two bins must not share a key space.');
+    $this->assertStringContainsString('render', $render, 'And each one is named after its bin.');
+    $this->assertStringContainsString('dynamic_page_cache', $dynamic);
+  }
+
 }

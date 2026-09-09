@@ -142,4 +142,33 @@ class ExpiredWriteInTransactionTest extends UnitTestCase {
     $this->assertFalse($backend->get('dos'), 'And gone afterwards.');
   }
 
+  /**
+   * The same with two cache IDs, which is what tells the two sets apart.
+   *
+   * Every other test here writes one cache ID, and with sets of one element
+   * array_diff() gives the same answer whichever way round its arguments go -
+   * so they could be swapped with the suite green. Swapped, what was written
+   * properly stops being readable and is deleted at commit, while what really
+   * was pending deletion gets served.
+   *
+   * @covers ::setMultiple
+   */
+  public function testTwoCacheIdsTellTheTwoSetsApart(): void {
+    $this->container(TRUE);
+    $backend = $this->backend();
+
+    // One entry is pending deletion; a different one is written properly.
+    $backend->set('pendiente', 'VIEJO', CacheBackendInterface::CACHE_PERMANENT);
+    $backend->delete('pendiente');
+    $backend->set('buena', 'BUENA', CacheBackendInterface::CACHE_PERMANENT);
+
+    $escrita = $backend->get('buena');
+    $this->assertNotFalse($escrita, 'The entry written properly must be readable.');
+    $this->assertSame('BUENA', $escrita->data);
+    $this->assertFalse(
+      $backend->get('pendiente'),
+      'And the one queued for deletion must stay unreadable until the commit.'
+    );
+  }
+
 }

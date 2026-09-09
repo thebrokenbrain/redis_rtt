@@ -17,11 +17,19 @@ parameters:
         # Named one by one rather than left open. Open, this covered any Redis
         # command at all: renaming hgetall to hgetallx still produced "No
         # errors", so the one check that could catch a mistyped command was
-        # answering for every possible one. The list is the module's whole
-        # vocabulary, and adding a command means adding it here.
+        # answering for every possible one. Adding a command to the module means
+        # adding it here, and that is the point: the analyser is then the thing
+        # that notices a typo.
+        #
+        # Each list is the minimum that silences a real error, not the module's
+        # whole vocabulary - which is what the comment used to claim. Measured
+        # by removing each name and re-running: every name below is load-bearing
+        # in both PHPStan 1.12 and 2.2. Twelve dead ones were removed, eleven of
+        # them from the CountingClient rule, where only the three calls the
+        # tests make directly are seen at all.
         -
             identifier: method.notFound
-            message: '#Call to an undefined method Drupal\\redis\\ClientInterface::(clearLastError|close|eval|exec|get|getLastError|getOption|hgetall|mget|multi|pipeline|select|set|ttl)\(\)#'
+            message: '#Call to an undefined method Drupal\\redis\\ClientInterface::(clearLastError|close|eval|exec|get|getLastError|getOption|hgetall|mget|multi|pipeline|select|ttl)\(\)#'
         # CountingClient is the same facade with a counter around it: it
         # implements that interface and forwards through its own __call().
         # This used to be routed into the rule above by annotating the local
@@ -29,7 +37,7 @@ parameters:
         # narrower native type - and which hid what was really silenced.
         -
             identifier: method.notFound
-            message: '#Call to an undefined method Drupal\\redis_rtt\\Client\\CountingClient::(clearLastError|close|eval|exec|get|getLastError|getOption|hgetall|mget|multi|pipeline|select|set|ttl)\(\)#'
+            message: '#Call to an undefined method Drupal\\redis_rtt\\Client\\CountingClient::(clearLastError|get|getLastError)\(\)#'
         # LuaRedisLockTest::register() swaps the 'lock' service for this
         # module's backend, which is the whole point of the test. Static
         # analysis reads the type off core's default service definition and

@@ -228,4 +228,100 @@ class LockScriptRejectedReplyTest extends UnitTestCase {
     $this->assertFalse($lock->lockMayBeAvailable('uno'), 'Still not theirs to free.');
   }
 
+  /**
+   * Once a refusal is remembered, acquire() stops sending scripts too.
+   *
+   * The guard at the top of each method is what turns one refusal into no
+   * further attempts for the rest of the request. release() had a test that
+   * pinned it, by counting attempts; acquire() and releaseAll() did not, so
+   * either guard could be deleted with the suite still green.
+   *
+   * @covers ::acquire
+   */
+  public function testAcquireStopsSendingScriptsOnceRefused(): void {
+    $client = new ScriptFailingClient(new FakeRedisClient());
+    $lock = $this->lock($client);
+
+    $lock->acquire('uno', 3600);
+    $lock->release('uno');
+    $this->assertSame(1, $client->scriptAttempts, 'The release tried once.');
+    $this->assertTrue(Scripting::unavailable($client), 'And it was remembered.');
+
+    // A plain acquire is a SET NX and sends no script either way, so the one
+    // that would is the extension of a lock this process already holds.
+    $lock->acquire('dos', 3600);
+    $lock->acquire('dos', 3600);
+
+    $this->assertSame(1, $client->scriptAttempts, 'No script after the refusal.');
+    $this->assertFalse($lock->lockMayBeAvailable('dos'), 'And the lock is held.');
+  }
+
+  /**
+   * The same guard on releaseAll().
+   *
+   * @covers ::releaseAll
+   */
+  public function testReleaseAllStopsSendingScriptsOnceRefused(): void {
+    $client = new ScriptFailingClient(new FakeRedisClient());
+    $lock = $this->lock($client);
+
+    $lock->acquire('uno', 3600);
+    $lock->release('uno');
+    $this->assertSame(1, $client->scriptAttempts);
+
+    $lock->acquire('dos', 3600);
+    $lock->acquire('tres', 3600);
+    $lock->releaseAll();
+
+    $this->assertSame(1, $client->scriptAttempts, 'No script after the refusal.');
+    $this->assertTrue($lock->lockMayBeAvailable('dos'), 'And both were released.');
+    $this->assertTrue($lock->lockMayBeAvailable('tres'), 'And both were released.');
+  }
+
+  /**
+   * A refusal that arrives as an exception makes acquire() delegate.
+   *
+   * The reply path and the exception path are separate branches, and only the
+   * first had a test: the second could be made to return FALSE instead of
+   * handing over, and the process would report having lost a lock it holds.
+   *
+   * @covers ::acquire
+   */
+  public function testExtendDelegatesWhenTheScriptThrowsRefusal(): void {
+    $client = new ScriptRefusingClient(new FakeRedisClient());
+    $lock = $this->lock($client);
+
+    $this->assertTrue($lock->acquire('trabajo', 3600), 'Taken with a plain SET NX.');
+
+    $this->assertTrue(
+      $lock->acquire('trabajo', 3600),
+      'A thrown refusal must hand over to the inherited path, not report a lost lock.'
+    );
+    $this->assertTrue(Scripting::unavailable($client), 'And be remembered.');
+    $this->assertFalse($lock->lockMayBeAvailable('trabajo'), 'The lock is still held.');
+  }
+
+  /**
+   * An exception that is not a refusal keeps propagating out of acquire().
+   *
+   * Swallowing it would turn a bug in this module - or a Redis in trouble -
+   * into a silent slow path.
+   *
+   * @covers ::acquire
+   */
+  public function testExtendRethrowsWhatIsNotRefusal(): void {
+    $client = new ScriptRefusingClient(
+      new FakeRedisClient(),
+      'ScriptRefusing',
+      'READONLY You can\'t write against a read only replica'
+    );
+    $lock = $this->lock($client);
+    $this->assertTrue($lock->acquire('trabajo', 3600));
+
+    $this->expectException(\RedisException::class);
+    $this->expectExceptionMessage('READONLY');
+
+    $lock->acquire('trabajo', 3600);
+  }
+
 }

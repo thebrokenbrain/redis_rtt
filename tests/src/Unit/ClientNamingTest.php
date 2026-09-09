@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Drupal\Tests\redis_rtt\Unit;
 
 use Drupal\Tests\UnitTestCase;
+use Drupal\redis\ClientInterface;
 use Drupal\redis_rtt\Client\CountingClient;
 use Drupal\redis_rtt\Client\PhpRedisRtt;
 use Drupal\redis_rtt\Client\PhpRedisRttFactory;
@@ -107,6 +108,51 @@ class ClientNamingTest extends UnitTestCase {
     $this->assertNotSame($inner, $counted, 'With it, the client is wrapped.');
     $this->assertInstanceOf(CountingClient::class, $counted);
     $this->assertSame('PhpRedisRtt (instrumented)', $counted->getName());
+  }
+
+  /**
+   * The factory actually calls the wrapper on the way out.
+   *
+   * ::instrument() had a test, by reflection, and its one call site had none:
+   * deleting `$this->instrument(...)` from ::getClient() left the suite green
+   * while count_commands quietly stopped counting. That is the instrument every
+   * published round-trip figure was measured with, so a broken wiring would not
+   * have failed a test, it would have made every number wrong.
+   *
+   * @covers \Drupal\redis_rtt\Client\PhpRedisRttFactory::getClient
+   */
+  public function testGetClientPutsTheCounterInPlace(): void {
+    $factory = new RecordingConnectFactory();
+
+    $plain = $factory->getClient(['host' => '127.0.0.1', 'port' => 6379]);
+    $this->assertNotInstanceOf(CountingClient::class, $plain, 'Off by default.');
+
+    $counted = $factory->getClient(['host' => '127.0.0.1', 'port' => 6379, 'count_commands' => TRUE]);
+    $this->assertInstanceOf(
+      CountingClient::class,
+      $counted,
+      'With count_commands on, what comes out of the factory has to be the counter.'
+    );
+  }
+
+}
+
+/**
+ * A factory that connects to nothing, so ::getClient() can be called at all.
+ */
+class RecordingConnectFactory extends PhpRedisRttFactory {
+
+  /**
+   * {@inheritdoc}
+   *
+   * @param array<string, mixed> $settings
+   *   The connection settings.
+   *
+   * @return \Drupal\redis\ClientInterface
+   *   A client over a mock socket.
+   */
+  protected function connect(#[\SensitiveParameter] array $settings): ClientInterface {
+    return new PhpRedisRtt(new \Redis());
   }
 
 }

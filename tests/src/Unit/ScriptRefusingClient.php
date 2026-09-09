@@ -23,6 +23,7 @@ final class ScriptRefusingClient implements ClientInterface {
   public function __construct(
     protected FakeRedisClient $inner,
     protected string $name = 'ScriptRefusing',
+    protected string $message = "NOPERM User default has no permissions to run the 'eval' command",
   ) {}
 
   /**
@@ -39,7 +40,7 @@ final class ScriptRefusingClient implements ClientInterface {
   public function __call(string $name, array $arguments) {
     if (strtolower($name) === 'eval') {
       $this->scriptAttempts++;
-      throw new \RedisException("NOPERM User default has no permissions to run the 'eval' command");
+      throw new \RedisException($this->message);
     }
     return $this->inner->__call($name, $arguments);
   }

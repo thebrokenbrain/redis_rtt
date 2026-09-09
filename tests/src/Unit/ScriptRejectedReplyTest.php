@@ -240,4 +240,77 @@ class ScriptRejectedReplyTest extends UnitTestCase {
     );
   }
 
+  /**
+   * A message that names a script but is not a refusal keeps propagating.
+   *
+   * ::isRefusal() has two halves: the message must name eval or scripting, and
+   * it must carry one of four refusal markers. Every message any test had ever
+   * given it failed the first half, so the second one had never run - the four
+   * markers could all be deleted, or the loop replaced by `return TRUE`, with
+   * the suite green. These are the messages that reach it: real Redis 7 answers
+   * to an EVAL that failed on its own merits.
+   *
+   * @covers ::refuses
+   * @covers ::refusedReply
+   */
+  public function testScriptErrorNamingEvalIsNotRefusal(): void {
+    $notRefusals = [
+      "ERR Error compiling script (new function): user_script:1: '=' expected near 'eval'",
+      'ERR Error running script (call to f_1): @user_script:1: eval blocked',
+      "BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE. Sent by EVAL",
+    ];
+    foreach ($notRefusals as $message) {
+      $this->assertFalse(
+        Scripting::refuses(new \RedisException($message)),
+        "Names a script but refuses nothing, so it must keep propagating: $message"
+      );
+      [, $client] = $this->backend();
+      $client->seedLastError($message);
+      $this->assertFalse(
+        Scripting::refusedReply($client, FALSE),
+        "And the same through the reply path: $message"
+      );
+    }
+
+    // The control: the same first half, with a marker, is a refusal.
+    $this->assertTrue(
+      Scripting::refuses(new \RedisException("ERR unknown command 'EVAL'")),
+      'A marker is what makes the difference, and it still does.'
+    );
+  }
+
+  /**
+   * A reply set longer than what was queued is not whole either.
+   *
+   * The count check is not redundant with the two conditions beside it. A
+   * pipeline whose queue was dragged in from earlier answers with more replies
+   * than were asked for, and array_pop() would then take one of those as the
+   * flush marker: a timestamp read out of somebody else\'s answer.
+   *
+   * @covers \Drupal\redis_rtt\Cache\PipeliningRedisBackend::getMultiple
+   */
+  public function testLongerReplySetIsNotTreatedAsWhole(): void {
+    $client = new OverlongReplyClient(new FakeRedisClient());
+    $checksum = $this->createMock(CacheTagsChecksumInterface::class);
+    $checksum->method('isValid')->willReturn(TRUE);
+
+    $writer = new PipeliningRedisBackend('render', $client, $checksum, new PhpSerialize());
+    $writer->setPrefix('p');
+    $writer->set('uno', 'V1');
+    $flusher = new PipeliningRedisBackend('render', $client, $checksum, new PhpSerialize());
+    $flusher->setPrefix('p');
+    $flusher->deleteAll();
+
+    $reader = new PipeliningRedisBackend('render', $client, $checksum, new PhpSerialize());
+    $reader->setPrefix('p');
+    $client->overlong = TRUE;
+    $cids = ['uno'];
+    $reader->getMultiple($cids);
+
+    $this->assertFalse(
+      $reader->get('uno'),
+      'A flush that really happened must stay honoured, not be overwritten by a stray reply.'
+    );
+  }
+
 }

@@ -13,6 +13,26 @@ use Drupal\redis\ClientFactory as RedisClientFactory;
 use Drupal\redis_rtt\Client\PhpRedisRttFactory;
 
 /**
+ * Returns where this module lives, relative to the docroot.
+ *
+ * Derived from this file rather than asked of the extension list, so that it
+ * answers the same outside a built container - a status report is rendered
+ * inside one, but hook_requirements() is also called from tests and from
+ * install-time code where the service may not be there.
+ *
+ * @return string
+ *   The module path, e.g. "modules/contrib/redis_rtt".
+ */
+function _redis_rtt_module_path(): string {
+  $dir = dirname(__FILE__);
+  if (defined('DRUPAL_ROOT') && str_starts_with($dir, DRUPAL_ROOT . '/')) {
+    return substr($dir, strlen(DRUPAL_ROOT) + 1);
+  }
+
+  return 'modules/contrib/redis_rtt';
+}
+
+/**
  * Implements hook_requirements().
  *
  * Enabling this module changes nothing on its own: every optimisation is
@@ -151,9 +171,18 @@ function redis_rtt_requirements(string $phase): array {
       ? t('@count of @total inactive', ['@count' => count($missing), '@total' => count($overrides)])
       : t('All active'),
     'severity' => $missing ? REQUIREMENT_WARNING : REQUIREMENT_OK,
+    // The path is read from the extension list rather than written out. A
+    // hardcoded modules/contrib/... is wrong wherever Composer or a hand
+    // install put the module somewhere else, and Drupal ignores a
+    // container_yamls entry that does not exist without saying anything: the
+    // advice then does nothing, drush cr still exits 0, and this row goes on
+    // saying "inactive" for ever.
     'description' => $missing ? t(
-      'Inactive: @list. Add the module\'s service overrides to settings.php: <code>$settings["container_yamls"][] = "modules/contrib/redis_rtt/redis_rtt.services.example.yml";</code>',
-      ['@list' => implode(', ', $missing)]
+      'Inactive: @list. Add the module\'s service overrides to settings.php: <code>$settings["container_yamls"][] = "@path/redis_rtt.services.example.yml";</code>',
+      [
+        '@list' => implode(', ', $missing),
+        '@path' => _redis_rtt_module_path(),
+      ]
     ) : NULL,
   ];
 
