@@ -6,7 +6,6 @@ namespace Drupal\Tests\redis_rtt\Kernel;
 
 use Drupal\KernelTests\KernelTestBase;
 use Drupal\redis\ClientInterface;
-use Drupal\redis\Client\PhpRedisFactory;
 use Drupal\redis_rtt\Client\PhpRedisRttFactory;
 
 /**
@@ -101,12 +100,12 @@ class PhpRedisRttConnectionTest extends KernelTestBase {
    *
    * This is the whole point of the class: the stock factory never passes the
    * option, so a half-open connection - the ordinary outcome of an availability
-   * zone failing over - blocks the worker until the FPM timeout instead of
-   * erroring. Dropping the ::setOption() call, or never asking ::readTimeout()
-   * for the value, leaves a connection that reports 0 and waits for ever.
+   * zone failing over - holds the worker for php.ini's default_socket_timeout
+   * instead of erroring. Dropping the ::setOption() call, or resolving the
+   * value wrongly, leaves a connection bounded by something the operator did
+   * not ask for.
    *
    * @covers ::connect
-   * @covers ::readTimeout
    */
   public function testTheConfiguredReadTimeoutReachesTheSocket(): void {
     $client = (new PhpRedisRttFactory())->getClient($this->settings(['read_timeout' => 0.25]));
@@ -124,7 +123,6 @@ class PhpRedisRttConnectionTest extends KernelTestBase {
    * With no read timeout configured, the socket still gets the class default.
    *
    * @covers ::connect
-   * @covers ::readTimeout
    */
   public function testTheDefaultReadTimeoutReachesTheSocket(): void {
     $client = (new PhpRedisRttFactory())->getClient($this->settings());
@@ -138,19 +136,25 @@ class PhpRedisRttConnectionTest extends KernelTestBase {
   }
 
   /**
-   * A read timeout of zero means "no limit" and must not break the connection.
+   * A read timeout of zero asks for php.ini's bound, and gets it.
    *
-   * Zero is what phpredis documents for an unbounded read and what an operator
-   * writing it is asking for, but it cannot be passed on as written: measured
-   * here, ::setOption(OPT_READ_TIMEOUT, 0.0) makes the next read fail with a
-   * socket error, so a site that set it got an HTTP 500 on every page while the
-   * stock factory - which never passes the option - served it normally. A
-   * negative value reaches the unbounded behaviour reliably.
+   * Zero is what an operator writes to ask for what the site would do without
+   * this module, and what the site would do is wait for php.ini's
+   * default_socket_timeout. It cannot be passed to ::setOption() as written:
+   * measured here, ::setOption(OPT_READ_TIMEOUT, 0.0) makes the next read fail
+   * with a socket error, so a site that set it got an HTTP 500 on every page
+   * while the stock factory served it normally. So 0.0 goes to ::pconnect(),
+   * exactly as the stock factory sends it, and php.ini's own number is what is
+   * imposed on the connection afterwards.
    *
-   * The assertion is that the connection *works*, because that is what broke.
+   * Asserted against ini_get() and not against the stock factory's
+   * ::getOption(), which reports 0.0 for a connection that is in fact bounded
+   * by php.ini: comparing the two reported numbers pins what phpredis says
+   * rather than what the socket does, and passes while the two connections
+   * behave differently. That is what
+   * ::testStockDoesNotInheritAnEarlierBound() measures instead.
    *
    * @covers ::connect
-   * @covers ::readTimeout
    */
   public function testReadTimeoutOfZeroLeavesWorkingConnection(): void {
     $client = (new PhpRedisRttFactory())->getClient($this->settings(['read_timeout' => 0]));
@@ -159,28 +163,78 @@ class PhpRedisRttConnectionTest extends KernelTestBase {
       $this->roundTrip($client),
       'Asking for the stock behaviour must not take the site down: this is the read that used to fail.',
     );
-    // Compared against the stock factory rather than against a number, because
-    // "the stock behaviour" is defined by what that factory leaves behind and
-    // not by what php.ini says: phpredis reports an unconfigured read timeout
-    // as 0.0 whatever default_socket_timeout holds, and uses the ini value
-    // internally. Asserting on the ini value would fail while the connection
-    // was in fact identical.
-    $stock_client = (new PhpRedisFactory())->getClient($this->settings());
 
-    $this->assertSame(
-      (float) $stock_client->getOption(\Redis::OPT_READ_TIMEOUT),
+    $this->assertEqualsWithDelta(
+      (float) ini_get('default_socket_timeout'),
       (float) $client->getOption(\Redis::OPT_READ_TIMEOUT),
-      'Zero must leave the connection exactly as the stock factory would.',
+      0.001,
+      'Zero must leave the connection bounded by what php.ini says, which is what a site without this module gets.',
     );
 
     // And the control, so this is not two identical mistakes agreeing: a
-    // positive setting does change it, and away from what stock has.
+    // positive setting does change it, and away from php.ini's number.
     $bounded = (new PhpRedisRttFactory())->getClient($this->settings(['read_timeout' => 2.5]));
     $this->assertEqualsWithDelta(
       2.5,
       (float) $bounded->getOption(\Redis::OPT_READ_TIMEOUT),
       0.001,
       'A positive read timeout is configured, and this test can tell the difference.',
+    );
+  }
+
+  /**
+   * The stock state does not inherit the bound of an earlier connection.
+   *
+   * Not a number read back but a read that is allowed to take its time, which
+   * is the only way to tell the two apart: phpredis reports an unconfigured
+   * read timeout as 0.0 whatever is really bounding the socket.
+   *
+   * phpredis applies ::pconnect()'s read timeout parameter to the stream only
+   * when it is greater than zero. Handing it the 0.0 that means "stock" and
+   * stopping there is therefore an exact imitation of the stock factory on a
+   * fresh socket and not on a pooled one: a socket that carried a bounded
+   * connection earlier in the request - or earlier in the worker's life, which
+   * is what changing read_timeout to 0 without recycling the pool leaves
+   * behind - keeps that bound, and the status report goes on naming php.ini's
+   * number. Measured before this was fixed: 0.25 s in force where the row said
+   * 60, and a worker held 4.09 s where php.ini said 1.
+   *
+   * @covers ::connect
+   */
+  public function testStockDoesNotInheritAnEarlierBound(): void {
+    $pool = ['persistent' => TRUE, 'persistent_id' => 'rtt_inherit_' . getmypid()];
+    $bounded = (new PhpRedisRttFactory())->getClient($this->settings($pool + ['read_timeout' => 0.25]));
+    $this->assertSame('v', $this->roundTrip($bounded), 'The bounded connection works.');
+    // Released back to the pool before the next one asks for it: phpredis hands
+    // out a fresh socket while the pooled one is still held, and then there is
+    // nothing to inherit and this test would pass on any code at all.
+    unset($bounded);
+
+    // Pinned rather than read, so the assertion does not depend on the php.ini
+    // of whoever runs the suite: what has to hold is that php.ini's number is
+    // the one in force, and 10 s is comfortably longer than both the bound the
+    // pool carried and the read below.
+    $original = ini_get('default_socket_timeout');
+    ini_set('default_socket_timeout', '10');
+    try {
+      $stock = (new PhpRedisRttFactory())->getClient($this->settings($pool + ['read_timeout' => 0]));
+    }
+    finally {
+      ini_set('default_socket_timeout', (string) $original);
+    }
+
+    // A read that takes longer than the bound the pool carried and less than
+    // php.ini's, on a key nothing will ever push to. Without the fix this
+    // raises a RedisException after 0.25 s.
+    $started = microtime(TRUE);
+    $answer = $stock->blpop(['redis_rtt_inherit_probe_' . getmypid()], 1);
+    $elapsed = microtime(TRUE) - $started;
+
+    $this->assertSame([], $answer, 'The read has to come back empty, not raise.');
+    $this->assertGreaterThan(
+      0.9,
+      $elapsed,
+      'And it has to have been allowed to wait: a shorter read means the pooled socket kept the earlier bound.',
     );
   }
 

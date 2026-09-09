@@ -62,7 +62,14 @@ class ApcuShortcutStoreTest extends UnitTestCase {
   }
 
   /**
-   * What is dropped is the oldest, and the newest is still readable.
+   * What is dropped from the memo is the oldest, and the newest is still there.
+   *
+   * Asserted on the memo rather than on ::get(), which is not the same question
+   * and does not have the same answer: with APCu enabled the evicted entry is
+   * still in the segment and ::get() hands it back, quite correctly. This used
+   * to assert that ::get('elemento:0') was NULL, which held only because the
+   * suite runs with apc.enable_cli off - run it with `-d apc.enable_cli=1` and
+   * the test failed while nothing was wrong.
    *
    * @covers ::memoise
    */
@@ -71,10 +78,11 @@ class ApcuShortcutStoreTest extends UnitTestCase {
     for ($i = 0; $i < 15; $i++) {
       $store->set("elemento:$i", ['cid' => "c$i"]);
     }
+    $memo = $this->memo($store);
 
-    $this->assertNull($store->get('elemento:0'), 'The first one written is gone.');
-    $this->assertSame(['cid' => 'c14'], $store->get('elemento:14'), 'The last one is there.');
-    $this->assertSame(['cid' => 'c5'], $store->get('elemento:5'), 'And so is the oldest kept.');
+    $this->assertArrayNotHasKey('elemento:0', $memo, 'The first one written left the memo.');
+    $this->assertSame(['cid' => 'c14'], $memo['elemento:14'] ?? NULL, 'The last one is there.');
+    $this->assertSame(['cid' => 'c5'], $memo['elemento:5'] ?? NULL, 'And so is the oldest kept.');
   }
 
   /**
@@ -99,11 +107,15 @@ class ApcuShortcutStoreTest extends UnitTestCase {
    * Note on ::get() and the memo, which is deliberately not tested here.
    *
    * ::get() memoises what it read out of APCu, and a mutation that deletes that
-   * line survives this suite. It is not a coverage hole that a test can close:
-   * with APCu off - which is how this suite runs, and the normal state of a CLI
-   * process - the memo IS the store, so a read that misses it has nowhere else
-   * to look and the line is unreachable. The mutant is equivalent in this
-   * environment and only distinguishable with the extension enabled.
+   * line survives this suite. With APCu off - which is how this suite runs by
+   * default, and the normal state of a CLI process - the memo IS the store, so
+   * a read that misses it has nowhere else to look and the line is unreachable.
+   * The mutant is equivalent in that environment and only distinguishable with
+   * the extension enabled.
+   *
+   * Which is a property of the environment, not a guarantee, so nothing else in
+   * this file depends on it: the suite passes with `-d apc.enable_cli=1` too,
+   * and if it stops doing so that is a defect and not a configuration.
    *
    * A test guarded by markTestSkipped() was written and then removed: it turned
    * the suite's summary into "OK, but incomplete, skipped, or risky", which

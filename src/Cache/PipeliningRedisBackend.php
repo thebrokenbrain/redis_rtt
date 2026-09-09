@@ -119,22 +119,33 @@ LUA;
     // flush was supposed to have retired. An absent marker legitimately means
     // that; a reply set that did not come back whole means nothing at all.
     //
-    // Two rounds of measuring have narrowed what "not whole" can actually be,
-    // and the honest answer is that the count check below defends a contract
-    // rather than an observed failure. ::exec() does answer FALSE instead of
-    // raising for several connection states, and that is real. But a set that
-    // is *shorter* than the queue does not happen: phpredis 5.3.7 and 6.3.0
-    // raise instead. Nor does a *longer* one: with a queue genuinely dragged in
-    // from earlier on the socket, phpredis and Relay both read exactly as many
-    // replies as commands were queued, and the leftover arrives at the front,
-    // so the set is the right length with its contents shifted by one.
+    // Three rounds of measuring have narrowed what "not whole" can actually be,
+    // and the honest answer is that neither check below defends against the
+    // shape a real desynchronised socket produces. ::exec() does answer FALSE
+    // instead of raising for several connection states, and that is real. A set
+    // *shorter* than the queue does not happen: phpredis 6.3.0 raises, or dies
+    // with a SIGSEGV, but never answers short. Nor does a *longer* one: with a
+    // queue genuinely dragged in from earlier on the socket, measured through a
+    // TCP proxy, phpredis and Relay both read exactly as many replies as
+    // commands were queued and the leftover arrives at the front.
     //
-    // That shifted shape is the one that can happen, and it is is_scalar()
-    // below that stops it, not the count: every reply but the marker is an
-    // HGETALL, so a shift puts an array where the timestamp should be and it is
-    // refused. The count check stays because it is free and because a client
-    // that did answer short or long would otherwise be believed, but it is not
-    // what is doing the work here.
+    // What that leaves is the right length with everything one position late,
+    // and what happens then depends on the client. On Relay 0.40.0 the shift
+    // does put an HGETALL's array where the timestamp belongs and is_scalar()
+    // refuses it. On phpredis 6.3.0 - the client this module configures and
+    // recommends - it does not: the parser desynchronises too, and the last
+    // slot comes back as a raw protocol fragment, the string "*14", which is
+    // scalar. Measured with four kinds of leftover; all four behaved the same.
+    // So the marker is read as (float) "*14" = 0.0, which is the 1970 this
+    // whole comment is about, and neither the count nor is_scalar() stops it.
+    //
+    // No code here is what protects against that, and none is proposed:
+    // \Drupal\redis\Cache\RedisBackend reaches the identical outcome on the
+    // same socket by another route - its getLastDeleteAll() casts whatever its
+    // own GET returns - so a site running the stock backend is no better off.
+    // The checks below stay because they are free and because they do catch the
+    // shapes they name: a FALSE from ::exec(), and a marker that never came
+    // back at all, which is what a short set would leave behind.
     $replies = is_array($replies) ? $replies : [];
     $intact = count($replies) === $expected;
 

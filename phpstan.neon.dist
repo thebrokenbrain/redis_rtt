@@ -28,13 +28,15 @@ parameters:
         #
         # "Load-bearing" is per version, and the two do not agree: ttl is
         # needed by 1.12 and not by 2.2, which does not look inside the call
-        # site that makes it. A name that only one version needs stays, because
-        # the list has to serve both - reportUnmatchedIgnoredErrors is off below
-        # for exactly this. Do not prune by measuring against one version only;
-        # removing ttl on 2.2's word alone breaks 1.12 with four errors.
+        # site that makes it. A name that only one version needs stays, and can:
+        # reportUnmatchedIgnoredErrors is on - it is on by default and this file
+        # does not turn it off - but it fires for an entry that matches nothing,
+        # not for one unused name inside an entry's alternation. Do not prune by
+        # measuring against one version only; removing ttl on 2.2's word alone
+        # breaks 1.12 with two errors, one per ->ttl() call in the tree.
         -
             identifier: method.notFound
-            message: '#Call to an undefined method Drupal\\redis\\ClientInterface::(clearLastError|close|eval|exec|get|getLastError|getOption|hgetall|mget|multi|pipeline|select|ttl)\(\)#'
+            message: '#Call to an undefined method Drupal\\redis\\ClientInterface::(blpop|clearLastError|close|eval|exec|get|getLastError|getOption|hgetall|mget|multi|pipeline|select|ttl)\(\)#'
         # CountingClient is the same facade with a counter around it: it
         # implements that interface and forwards through its own __call().
         # This used to be routed into the rule above by annotating the local

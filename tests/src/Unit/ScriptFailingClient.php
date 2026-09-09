@@ -53,6 +53,15 @@ final class ScriptFailingClient implements ClientInterface {
   public bool $recordsReason = TRUE;
 
   /**
+   * Whether the next WATCH raises instead of answering.
+   *
+   * For the inherited release path, which opens with one: a connection that
+   * dies there is how ::releaseAll() can throw in the middle of walking the
+   * locks, which is what the finally in ::releaseAllInherited() is for.
+   */
+  public bool $throwOnNextWatch = FALSE;
+
+  /**
    * Whether a pipeline is open.
    */
   protected bool $piping = FALSE;
@@ -142,6 +151,10 @@ final class ScriptFailingClient implements ClientInterface {
    *   FALSE for a script, the inner client's answer otherwise.
    */
   protected function one(string $name, array $arguments) {
+    if ($name === 'watch' && $this->throwOnNextWatch) {
+      $this->throwOnNextWatch = FALSE;
+      throw new \RedisException('Connection lost');
+    }
     if ($name === 'eval') {
       $this->scriptAttempts++;
       if ($this->failScripts) {

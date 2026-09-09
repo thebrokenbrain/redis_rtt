@@ -11,9 +11,11 @@ use Drupal\redis\ClientInterface;
  * PhpRedis factory that configures the connection the stock one leaves bare.
  *
  * \Drupal\redis\Client\PhpRedisFactory calls pconnect() with nothing but host
- * and port. The consequential default is read_timeout, which is *unlimited*: a
- * connection dropped by a failover blocks the PHP-FPM worker until the FPM
- * request timeout rather than failing fast, which under load turns a thirty
+ * and port. The consequential default is read_timeout, which is then php.ini's
+ * default_socket_timeout - 60 seconds out of the box, and unlimited only where
+ * php.ini itself says 0 or less. Either way it is far longer than a cache read
+ * has any business taking: a connection dropped by a failover holds the PHP-FPM
+ * worker for it rather than failing fast, which under load turns a thirty
  * second failover into an exhausted worker pool with nothing in the symptoms
  * pointing at Redis.
  *
@@ -124,11 +126,13 @@ class PhpRedisRttFactory extends PhpRedisFactory {
     $timeout = (float) ($settings['timeout'] ?? 1.0);
     $resolved = static::resolveReadTimeout($settings);
     $read_timeout = $resolved['timeout'];
-    // "Stock" means configuring nothing, not configuring php.ini's number: the
-    // stock factory passes 0.0 - which is what omitting the parameter gives -
-    // and never calls ::setOption(). Anything else is an imitation that differs
-    // from the original somewhere, and it did.
-    $configure_read_timeout = $resolved['state'] !== 'stock';
+    // What reaches ::pconnect() is what the stock factory sends - 0.0 in the
+    // stock state, which is what omitting the parameter gives. What reaches
+    // ::setOption() below is not the same number, and the difference is the
+    // whole point: see the note there.
+    $in_force = $resolved['state'] === 'stock'
+      ? (float) ini_get('default_socket_timeout')
+      : $read_timeout;
     $retry_interval = (int) ($settings['retry_interval'] ?? 100);
     $persistent_id = (string) ($settings['persistent_id'] ?? 'drupal');
 
@@ -189,34 +193,33 @@ class PhpRedisRttFactory extends PhpRedisFactory {
 
     $redis->setOption(\Redis::OPT_SERIALIZER, \Redis::SERIALIZER_NONE);
     // Detect a half-open connection - the common outcome of an AZ failover -
-    // instead of blocking the worker until the FPM timeout. Redundant on
-    // phpredis 6.3.0, where every connect branch above already carries the
-    // value and a pconnect() reusing a pooled socket reapplies it; kept as a
-    // safeguard for builds that ignore the connect parameter, and asserted on
-    // by nothing for that reason.
-    if ($configure_read_timeout) {
-      $redis->setOption(\Redis::OPT_READ_TIMEOUT, $read_timeout);
-    }
+    // instead of blocking the worker until the FPM timeout.
+    //
+    // Called unconditionally, and in the stock state with php.ini's number
+    // rather than with the 0.0 that went to ::pconnect(). Skipping the call
+    // there looks like the exact imitation of the stock factory and is one
+    // only on a fresh socket: phpredis applies the connect parameter to the
+    // stream just when it is greater than zero, so a pooled socket that
+    // carried a bounded connection earlier in the pool keeps that bound.
+    // Measured on phpredis 6.3.0: a connection with read_timeout 0.25
+    // followed, on the same CLIENT ID, by one asking for the stock behaviour
+    // with default_socket_timeout at 60 - the read died after 0.25 s, and the
+    // status report said 60 s. It goes the other way too: with
+    // default_socket_timeout at 1, a preceding read_timeout of 5 held the
+    // worker 4.09 s where a fresh socket gave up at 1.00 s.
+    //
+    // Re-imposing php.ini's own number is not the translation this class used
+    // to do. A default_socket_timeout of 0 means reads expire at once and one
+    // below zero means never, and passing either of those to ::setOption()
+    // reproduces what the stock factory's connection does with the same
+    // php.ini - both measured against the twin, on a Redis that answers and on
+    // one that does not.
+    $redis->setOption(\Redis::OPT_READ_TIMEOUT, $in_force);
     if (defined('Redis::OPT_TCP_KEEPALIVE')) {
       $redis->setOption(\Redis::OPT_TCP_KEEPALIVE, 1);
     }
 
     return new PhpRedisRtt($redis);
-  }
-
-  /**
-   * Returns the read timeout to hand phpredis, in seconds.
-   *
-   * @param array<string, mixed> $settings
-   *   The connection settings.
-   *
-   * @return float
-   *   The read timeout, or a negative value meaning no limit.
-   *
-   * @see \Drupal\Tests\redis_rtt\Kernel\PhpRedisRttConnectionTest
-   */
-  protected function readTimeout(#[\SensitiveParameter] array $settings): float {
-    return static::resolveReadTimeout($settings)['timeout'];
   }
 
   /**
@@ -244,11 +247,12 @@ class PhpRedisRttFactory extends PhpRedisFactory {
    * The value is now refused, the default stands, and ::$state says so, so the
    * status report can show it as a problem.
    *
-   * **Zero means the stock behaviour**, and the only way to mean that exactly
-   * is to do what the stock factory does: pass 0.0 to ::pconnect(), which is
-   * what leaving the parameter out amounts to, and never call ::setOption().
-   * phpredis then reads php.ini's default_socket_timeout at connect time, and
-   * whatever that says is what a site without this module would get.
+   * **Zero means the stock behaviour**, which is php.ini's
+   * default_socket_timeout: that is what bounds a connection the stock factory
+   * opened. ::connect() reaches it by passing the same 0.0 that factory passes
+   * and then imposing php.ini's own number on the connection - not by leaving
+   * ::setOption() uncalled, which is an imitation that holds on a fresh socket
+   * and breaks on a pooled one. See the note at that call.
    *
    * Two earlier attempts at this were wrong, in opposite directions. Passing
    * -1.0 removed even php.ini's bound: with default_socket_timeout at 3 and a
@@ -260,10 +264,12 @@ class PhpRedisRttFactory extends PhpRedisFactory {
    * this, still translating 0 to "no limit", held all six pool workers for the
    * full 40 s of the burst. Only the negative values mean forever.
    *
-   * So nothing is translated any more. ::setOption(OPT_READ_TIMEOUT, 0.0) is
-   * separately unusable - measured on phpredis 6.3.0, it makes the next read
-   * fail with "socket error on read socket" - which is why the call is skipped
-   * rather than made with a zero.
+   * So nothing is invented any more: what is imposed in the stock state is
+   * php.ini's number and nothing else, whatever it says. What must still never
+   * reach ::setOption() is the literal 0.0 this method returns - measured on
+   * phpredis 6.3.0, it makes the next read fail with "socket error on read
+   * socket" - and it does not: it goes to ::pconnect(), where it is what
+   * omitting the parameter means.
    *
    * @param array<string, mixed> $settings
    *   The connection settings.
@@ -287,9 +293,11 @@ class PhpRedisRttFactory extends PhpRedisFactory {
       return ['timeout' => $seconds, 'state' => 'bounded', 'raw' => $raw];
     }
 
-    // Not php.ini's value copied into the connection: 0.0, which is what the
-    // stock factory passes by leaving the parameter out, and no ::setOption()
-    // call at all. Copying it looked equivalent and is not - see the docblock.
+    // 0.0 is what the stock factory passes by leaving the parameter out, and
+    // it is what ::connect() hands ::pconnect(). It is NOT what ends up in
+    // force: 'stock' tells ::connect() and the status report to look php.ini's
+    // default_socket_timeout up instead. The two are different questions and
+    // this array only answers the first.
     return ['timeout' => 0.0, 'state' => 'stock', 'raw' => $raw];
   }
 

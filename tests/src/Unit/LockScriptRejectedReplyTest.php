@@ -332,7 +332,9 @@ class LockScriptRejectedReplyTest extends UnitTestCase {
    * that failed for a reason this module does not recognise, deliberately not
    * treated as "Redis refuses scripts" - each of those walked releases used to
    * send a fresh EVAL before falling back in its turn: six failed scripts for
-   * three locks, and thirteen round trips where there had been one.
+   * three locks where three were sent, and 19 round trips instead of 16. See
+   * ::releaseAllInherited() for the whole table, including the other state a
+   * lock can be in.
    *
    * @covers ::releaseAll
    * @covers ::releaseAllInherited
@@ -445,6 +447,78 @@ class LockScriptRejectedReplyTest extends UnitTestCase {
     $this->assertFalse(
       Scripting::unavailable($client),
       'A stale error must not be read as this script being refused.'
+    );
+  }
+
+  /**
+   * The decision taken for a batch does not outlive the batch.
+   *
+   * ::releaseAllInherited() switches ::release() to the inherited path for as
+   * long as it is walking the locks, and switches it back. Only the switching
+   * on was pinned: the line that switches it back could be deleted outright -
+   * both on the ordinary path and on the one an exception takes - and the whole
+   * suite stayed green, while every later release in the request quietly cost
+   * five round trips instead of one.
+   *
+   * @covers ::releaseAllInherited
+   */
+  public function testTheBatchDecisionDoesNotOutliveTheBatch(): void {
+    $client = new ScriptFailingClient(
+      new FakeRedisClient(),
+      'WRONGTYPE Operation against a key holding the wrong kind of value'
+    );
+    $lock = $this->lock($client);
+    $lock->acquire('uno', 3600);
+
+    $lock->releaseAll();
+    $this->assertFalse(Scripting::unavailable($client), 'Nothing was remembered, as intended.');
+
+    $before = $client->scriptAttempts;
+    $lock->acquire('dos', 3600);
+    $lock->release('dos');
+
+    $this->assertSame(
+      $before + 1,
+      $client->scriptAttempts,
+      'A release after the batch has to try Lua again: the batch decided for itself, not for the request.'
+    );
+  }
+
+  /**
+   * And it does not outlive it when the walk throws either.
+   *
+   * ::releaseAll() opens each inherited release with a WATCH, so a connection
+   * that dies mid-walk raises from inside the batch. That is what the finally
+   * is for, and without a test for it the try/finally could be flattened into
+   * two plain statements with the suite green.
+   *
+   * @covers ::releaseAllInherited
+   */
+  public function testTheBatchDecisionIsUndoneWhenTheWalkThrows(): void {
+    $client = new ScriptFailingClient(
+      new FakeRedisClient(),
+      'WRONGTYPE Operation against a key holding the wrong kind of value'
+    );
+    $lock = $this->lock($client);
+    $lock->acquire('uno', 3600);
+    $client->throwOnNextWatch = TRUE;
+
+    try {
+      $lock->releaseAll();
+      $this->fail('The dead connection has to propagate, not be swallowed.');
+    }
+    catch (\RedisException $e) {
+      $this->assertStringContainsString('Connection lost', $e->getMessage());
+    }
+
+    $before = $client->scriptAttempts;
+    $lock->acquire('dos', 3600);
+    $lock->release('dos');
+
+    $this->assertSame(
+      $before + 1,
+      $client->scriptAttempts,
+      'The next release has to try Lua again: an exception must not leave the batch decision behind.'
     );
   }
 

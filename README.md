@@ -129,14 +129,31 @@ $settings['container_yamls'][] = 'modules/contrib/redis_rtt/redis_rtt.services.e
 ```
 
 The `addPsr4()` call is only for installations that did not come through
-Composer. The classes named below are loaded before Drupal registers module
-namespaces, so something has to know where they live; `composer.json` declares
-`autoload.psr-4`, which covers it for a Composer install. If the module was
-unpacked by hand, keep the call. Without it the classes named below cannot be
-found: with `bootstrap_container_definition` in use that is a 500 on every page
-and a `drush` that will not boot, and without it the failure is narrower - the
-site keeps serving and the pieces that need those classes are simply inactive,
-which the status report says. Either way the fix is the same line. `$class_loader` is in scope inside `settings.php`.
+Composer. Some of the classes named below are loaded before Drupal registers
+module namespaces, so something has to know where they live; `composer.json`
+declares `autoload.psr-4`, which covers it for a Composer install. If the module
+was unpacked by hand, keep the call.
+
+What it prevents is worth being exact about, because it is not "the site breaks
+without it" in every case. Measured on a clean site, with the module unpacked by
+hand:
+
+| `addPsr4()` | module installed | result |
+|---|---|---|
+| present | yes | 200, every override active |
+| present | no | 200, `drush` boots |
+| absent | yes | 200, every override active - nothing changes |
+| absent | no | **500 on every page**, `drush` will not boot |
+
+With the module installed Drupal registers its namespace itself when it builds
+the container, so the line is doing nothing. What it covers is the other case:
+the `container_yamls` lines above are read whether or not the module is
+installed, so a site that uninstalls it - or that has not installed it yet - is
+still wired to services whose classes nobody can find. And with the
+`bootstrap_container_definition` block further down in use, the classes it names
+are needed before any of that, so the site is a 500 with or without the module
+installed. Keeping the line costs nothing and covers all of it. `$class_loader`
+is in scope inside `settings.php`.
 
 `redis.services.yml` has to come first, and it is the line most easily missed.
 Every service this module defines takes `@redis.factory` as an argument, and

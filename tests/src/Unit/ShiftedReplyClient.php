@@ -9,14 +9,21 @@ use Drupal\redis\ClientInterface;
 /**
  * A client whose pipeline answers the right number of replies, shifted by one.
  *
- * This is the shape a desynchronised socket really produces, measured against a
- * TCP proxy that drags a queue in from earlier: phpredis 5.3.7, phpredis 6.3.0
- * and Relay 0.40.0 all read exactly as many replies as commands were queued,
- * and the leftover arrives at the front. So the reply set is the right length
- * and every answer in it belongs to the command before it.
+ * The length is what a desynchronised socket really produces, measured against
+ * a TCP proxy that drags a queue in from earlier: phpredis 6.3.0 and Relay
+ * 0.40.0 both read exactly as many replies as commands were queued, and the
+ * leftover arrives at the front.
  *
- * A count check cannot see this. What refuses it is that every reply but the
- * marker is a hash, so the shift puts an array where the timestamp belongs.
+ * The *contents* are Relay's version of it, not phpredis's, and the difference
+ * matters enough to say here. On Relay the shift is clean, so the last slot
+ * holds an HGETALL's array and is_scalar() refuses it - which is what this
+ * double exercises. On phpredis the parser desynchronises as well and the last
+ * slot comes back as a raw protocol fragment such as "*14", a scalar that
+ * nothing here rejects; that shape is not covered by any test, because the
+ * outcome it produces is the one the stock backend produces too. See the note
+ * in \Drupal\redis_rtt\Cache\PipeliningRedisBackend::getMultiple().
+ *
+ * A count check cannot see either shape.
  */
 final class ShiftedReplyClient implements ClientInterface {
 

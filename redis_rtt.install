@@ -287,13 +287,16 @@ function redis_rtt_requirements(string $phase): array {
         break;
 
       case 'stock':
-        $connection_info[] = t('Reads are left exactly as they would be without this module: <code>$settings["redis.connection"]["read_timeout"]</code> is 0 or less, so nothing is configured on the connection and phpredis uses the <code>default_socket_timeout</code> of php.ini, currently @stock. Note that a value of 0 there means reads expire immediately, and a negative one means never. Set a positive <code>read_timeout</code> to bound reads regardless of php.ini.', [
+        $connection_info[] = t('Reads are bounded exactly as they would be without this module: <code>$settings["redis.connection"]["read_timeout"]</code> is 0 or less, so what is imposed on the connection is php.ini\'s <code>default_socket_timeout</code>, currently @stock - the same bound a site without this module would have. Note that a value of 0 there means reads expire immediately, and a negative one means never. Set a positive <code>read_timeout</code> to bound reads regardless of php.ini.', [
           '@stock' => _redis_rtt_socket_timeout(),
         ]);
         break;
 
       default:
-        $connection_info[] = t('Reads give up after @seconds s. That bounds a stalled Redis to one failed request instead of a blocked worker; without it a connection dropped by a failover holds the worker for php.ini\'s <code>default_socket_timeout</code>, 60 s out of the box. The trade is that a Redis slower than this answers with an error page rather than a slow page. Set <code>$settings["redis.connection"]["read_timeout"]</code> to change it, or to 0 for the stock behaviour.', ['@seconds' => $resolved['timeout']]);
+        $connection_info[] = t('Reads give up after @seconds s. That bounds a stalled Redis to one failed request instead of a blocked worker; without it a connection dropped by a failover holds the worker for php.ini\'s <code>default_socket_timeout</code>, currently @stock. The trade is that a Redis slower than this answers with an error page rather than a slow page. Set <code>$settings["redis.connection"]["read_timeout"]</code> to change it, or to 0 for the stock behaviour. Read the number from php.ini rather than assuming the 60 s of a stock install: on a host that lowers it, this module is the slower of the two.', [
+          '@seconds' => $resolved['timeout'],
+          '@stock' => _redis_rtt_socket_timeout(),
+        ]);
     }
   }
 

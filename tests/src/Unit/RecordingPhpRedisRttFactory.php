@@ -59,20 +59,25 @@ final class RecordingPhpRedisRttFactory extends PhpRedisRttFactory {
   }
 
   /**
-   * Exposes the read timeout the real ::connect() would have used.
+   * Exposes the read timeout the real ::connect() would hand ::pconnect().
    *
    * ::connect() is replaced wholesale above, which is what makes this factory
    * testable without a socket - and also what puts everything decided inside it
    * out of reach. This hands back the one decision that has a wrong answer.
    *
+   * Note that it is the number passed on connect, not the bound that ends up in
+   * force: in the stock state those differ on purpose, and only a real socket
+   * can tell them apart. That is
+   * \Drupal\Tests\redis_rtt\Kernel\PhpRedisRttConnectionTest's job.
+   *
    * @param array<string, mixed> $settings
    *   The connection settings.
    *
    * @return float
-   *   The read timeout that would be handed to phpredis.
+   *   The read timeout that would be handed to phpredis on connect.
    */
   public function readTimeoutFor(array $settings): float {
-    return $this->readTimeout($settings);
+    return static::resolveReadTimeout($settings)['timeout'];
   }
 
 }

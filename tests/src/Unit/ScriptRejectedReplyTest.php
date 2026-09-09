@@ -334,16 +334,28 @@ class ScriptRejectedReplyTest extends UnitTestCase {
     };
 
     $construir()->set('uno', 'V1');
+    $construir()->set('dos', 'V2');
     $construir()->deleteAll();
 
     $reader = $construir();
     $client->shifted = TRUE;
-    $cids = ['uno'];
+    // Two cache IDs, not one, and that is the whole test. With one the queue is
+    // [HGETALL, GET], the shift leaves [leftover, hash], array_pop() takes the
+    // only hash there was and the row set comes back empty - so what refuses
+    // the marker is the "no rows" check and is_scalar() is never reached.
+    // Replacing it with a check that does not tell arrays apart then leaves the
+    // whole suite green. With two, the row set is not empty and is_scalar() is
+    // the only thing deciding.
+    $cids = ['uno', 'dos'];
     $reader->getMultiple($cids);
 
     $this->assertFalse(
       $reader->get('uno'),
       'A flush that really happened must stay honoured after a shifted read.'
+    );
+    $this->assertFalse(
+      $reader->get('dos'),
+      'And for every entry it retired, not just the first.'
     );
   }
 

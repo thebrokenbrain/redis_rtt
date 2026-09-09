@@ -32,7 +32,11 @@ class LuaRedisLock extends RedisLock {
    *
    * Set only while ::releaseAllInherited() is walking the locks, so that a
    * decision already taken for the batch is not re-taken, and re-paid, once per
-   * lock. @see ::releaseAllInherited()
+   * lock. Unset again in a finally, because the walk can raise: the inherited
+   * release opens with a WATCH, and a connection that dies there would
+   * otherwise leave every later release in the request on the slow path.
+   *
+   * @see ::releaseAllInherited()
    */
   protected bool $skipScripts = FALSE;
 
@@ -235,8 +239,22 @@ LUA;
     // own. With nothing remembered - the path taken when a script failed for a
     // reason this module does not recognise - each of those would send a fresh
     // EVAL before falling back in its turn: for three locks, six failed scripts
-    // and thirteen round trips instead of one. The answer is already known
-    // here, so it is not asked again.
+    // where three were sent. The answer is already known here, so it is not
+    // asked again.
+    //
+    // What that saves, counted in round trips and measured three ways (this
+    // module's own counter, a clock against a proxy that delays every reply,
+    // and the server's own INFO commandstats), for three locks:
+    //
+    //   locks still held    without this line 19, with it 16, stock backend 15
+    //   locks already gone  without this line 13, with it 10, stock backend  9
+    //
+    // "Already gone" is a lock expired by its own PX or freed by somebody else,
+    // where the inherited release is WATCH/GET/UNWATCH rather than
+    // WATCH/GET/MULTI/DEL/EXEC. Both rows are the degraded path; when the
+    // script does run, the whole releaseAll() is one round trip. The remaining
+    // difference from the stock backend - one - is the pipeline that failed,
+    // which is the price of trying Lua once.
     $this->skipScripts = TRUE;
     try {
       parent::releaseAll($lock_id);
