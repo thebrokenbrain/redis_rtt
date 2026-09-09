@@ -291,4 +291,34 @@ class CountingClientTest extends UnitTestCase {
     return new CountingClient($inner);
   }
 
+  /**
+   * Reading and clearing the last-error slot is not a round trip.
+   *
+   * They are local to the extension: they read and write a field in the client
+   * and never reach Redis. The module calls them around every script it sends,
+   * so counting them would add a wait per script and make every published
+   * round-trip figure - all of which were taken with this decorator - wrong by
+   * that much.
+   *
+   * @covers ::__call
+   */
+  public function testTheLastErrorSlotIsNotCounted(): void {
+    $inner = $this->createMock(ClientInterface::class);
+    $inner->method('__call')->willReturn(NULL);
+    $client = new CountingClient($inner);
+    CountingClient::reset();
+
+    $client->clearLastError();
+    $client->getLastError();
+
+    $this->assertSame(0, CountingClient::$roundTrips, 'Neither is a wait.');
+    $this->assertSame(0, CountingClient::$commands, 'Neither is a command.');
+    $this->assertSame([], CountingClient::$byCommand, 'And neither shows up in the breakdown.');
+
+    // The control: something that really is a command does get counted.
+    $client->get('k');
+    $this->assertSame(1, CountingClient::$roundTrips);
+    $this->assertSame(1, CountingClient::$commands);
+  }
+
 }

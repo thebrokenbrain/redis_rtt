@@ -244,11 +244,12 @@ LUA;
     // One round trip for the whole set, instead of a sequential HGET + HSET per
     // cache ID.
     try {
+      Scripting::clearError($this->client);
       $this->client->pipeline();
       foreach ($cids as $cid) {
         $this->client->eval(static::INVALIDATE_LUA, [$this->getKey($cid)], 1);
       }
-      $this->client->exec();
+      $replies = $this->client->exec();
     }
     catch (\Exception $e) {
       // A pipeline of scripts that times out mid-flight leaves the connection
@@ -262,6 +263,20 @@ LUA;
         return;
       }
       throw $e;
+    }
+
+    // Most rejections never raise: they come back as FALSE. INVALIDATE_LUA
+    // answers 0 or 1 and nothing else, so a FALSE here means the entries were
+    // not invalidated - and that has to be answered by invalidating them the
+    // inherited way, whether or not the reason is one this module recognises.
+    // Doing nothing was the silent failure: the page kept serving 200 while
+    // retired content stayed valid. The connection is still usable after a
+    // rejected command, so there is nothing to discard.
+    if (Scripting::failedReply($replies)) {
+      if (Scripting::refusedReply($this->client, $replies)) {
+        Scripting::markRefused();
+      }
+      parent::invalidateMultiple($cids);
     }
   }
 

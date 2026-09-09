@@ -81,6 +81,11 @@ final class FakeRedisClient implements ClientInterface {
   private bool $piping = FALSE;
 
   /**
+   * The client's last-error slot, as phpredis keeps one.
+   */
+  public ?string $lastError = NULL;
+
+  /**
    * {@inheritdoc}
    *
    * @param string $name
@@ -101,6 +106,19 @@ final class FakeRedisClient implements ClientInterface {
       $this->piping = TRUE;
       $this->queue = [];
       return $this;
+    }
+
+    // Local to the extension, like ::close() below: they read and clear a slot
+    // in the client rather than talking to Redis, so they are answered here and
+    // are not counted as commands or as round trips. Counting them would add a
+    // wait per script the module sends and make every round-trip assertion in
+    // this suite wrong by that much.
+    if ($name === 'getlasterror') {
+      return $this->lastError;
+    }
+    if ($name === 'clearlasterror') {
+      $this->lastError = NULL;
+      return TRUE;
     }
 
     // Closing drops an open pipeline in phpredis, and this double has to do the

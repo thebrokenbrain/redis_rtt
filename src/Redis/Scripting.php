@@ -71,12 +71,23 @@ final class Scripting {
   /**
    * Whether an exception is Redis refusing to run a script.
    *
-   * Matched on the message because phpredis reports server errors as
-   * RedisException with no code to branch on. Both halves have to be present:
-   * a refusal that names neither EVAL nor scripting is somebody else's problem
-   * and must keep propagating, and a message naming EVAL without a refusal
-   * marker is a script that failed on its own merits - a bug in this module,
-   * which must not be quietly downgraded into a fallback.
+   * Matched on the message because there is no code to branch on. Both halves
+   * have to be present: a refusal that names neither EVAL nor scripting is
+   * somebody else's problem and must keep propagating, and a message naming
+   * EVAL without a refusal marker is a script that failed on its own merits -
+   * a bug in this module, which must not be quietly downgraded into a
+   * fallback.
+   *
+   * An exception is only half of it. This used to be the whole detection, on
+   * the strength of a docblock that said phpredis reports server errors as
+   * RedisException. It does not: measured on phpredis 5.3.7 and 6.3.0, only a
+   * short family - NOPERM, OOM, READONLY, BUSY, the AUTH ones - is raised, and
+   * the whole -ERR class comes back as FALSE with ::getLastError() set and
+   * nothing thrown. So a Redis with `rename-command EVAL ""` answered
+   * `ERR unknown command 'EVAL'`, this returned FALSE, and the fallback never
+   * fired: the invalidation did not invalidate, the lock was not released, and
+   * the page still said 200. Relay does the same, and additionally does not
+   * raise for an ACL refusal inside a pipeline. See ::refusedReply().
    *
    * @param \Throwable $e
    *   The exception raised while running or queueing a script.
@@ -85,7 +96,115 @@ final class Scripting {
    *   TRUE if Redis refused to run scripts at all.
    */
   public static function refuses(\Throwable $e): bool {
-    $message = $e->getMessage();
+    return static::isRefusal($e->getMessage());
+  }
+
+  /**
+   * Whether a script reply says the script did not run.
+   *
+   * The scripts in this module cannot answer FALSE on their own: the cache
+   * invalidation returns 0 or 1, and the lock scripts return 0 or the result of
+   * a DEL. A FALSE - or a FALSE anywhere in a pipeline's reply set - therefore
+   * always means Redis rejected the command, whatever the reason.
+   *
+   * Which is why the caller must act on this and not only on ::refusedReply():
+   * a rejection nobody recognises still has to be answered by doing the work
+   * the inherited way, or the invalidation is silently lost. Only a recognised
+   * refusal is worth remembering for the rest of the request.
+   *
+   * @param mixed $reply
+   *   What ::eval() or ::exec() answered.
+   *
+   * @return bool
+   *   TRUE if the script did not run.
+   */
+  public static function failedReply(mixed $reply): bool {
+    if ($reply === FALSE) {
+      return TRUE;
+    }
+    if (!is_array($reply)) {
+      return FALSE;
+    }
+    foreach ($reply as $one) {
+      if ($one === FALSE) {
+        return TRUE;
+      }
+    }
+
+    return FALSE;
+  }
+
+  /**
+   * Whether a script reply is Redis refusing to run scripts at all.
+   *
+   * The other half of ::refuses(), for the rejections that arrive as a return
+   * value instead of an exception - which is most of them. The reason is only
+   * available from the client's own last-error slot, so ::clearError() has to
+   * have been called before the script was sent or this reads a stale one.
+   *
+   * @param \Drupal\redis\ClientInterface $client
+   *   The connection the script ran on.
+   * @param mixed $reply
+   *   What ::eval() or ::exec() answered.
+   *
+   * @return bool
+   *   TRUE if Redis refused to run scripts at all.
+   */
+  public static function refusedReply(ClientInterface $client, mixed $reply): bool {
+    if (!static::failedReply($reply)) {
+      return FALSE;
+    }
+
+    return static::isRefusal(static::lastError($client));
+  }
+
+  /**
+   * Empties the client's last-error slot before a script is sent.
+   *
+   * Without this, ::refusedReply() can read an error left by an unrelated
+   * command earlier in the request. Local to the extension: no round trip, and
+   * excluded from the round-trip counter for that reason.
+   *
+   * @param \Drupal\redis\ClientInterface $client
+   *   The connection the script will run on.
+   */
+  public static function clearError(ClientInterface $client): void {
+    try {
+      $client->clearLastError();
+    }
+    catch (\Throwable) {
+      // A client that does not offer one cannot leave a stale error either.
+    }
+  }
+
+  /**
+   * Reads the client's last-error slot.
+   *
+   * @param \Drupal\redis\ClientInterface $client
+   *   The connection.
+   *
+   * @return string
+   *   The message, or the empty string when there is none to be had.
+   */
+  protected static function lastError(ClientInterface $client): string {
+    try {
+      return (string) $client->getLastError();
+    }
+    catch (\Throwable) {
+      return '';
+    }
+  }
+
+  /**
+   * Whether a message from Redis is a refusal to run scripts.
+   *
+   * @param string $message
+   *   The message, from an exception or from the client's last-error slot.
+   *
+   * @return bool
+   *   TRUE if it names both a script and a refusal.
+   */
+  protected static function isRefusal(string $message): bool {
     if (stripos($message, 'eval') === FALSE && stripos($message, 'scripting') === FALSE) {
       return FALSE;
     }

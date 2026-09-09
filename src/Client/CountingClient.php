@@ -82,6 +82,13 @@ class CountingClient implements ClientInterface {
   public function __call(string $name, array $arguments) {
     $lower = strtolower($name);
 
+    // Local to the extension, not commands: they read and clear a slot in the
+    // client. Counting them would add a wait per script this module sends and
+    // make the instrument report traffic that never left the process.
+    if ($lower === 'getlasterror' || $lower === 'clearlasterror') {
+      return $this->inner->__call($name, $arguments);
+    }
+
     if ($lower === 'pipeline' || $lower === 'multi') {
       $this->inPipeline = TRUE;
       $this->inMulti = $lower === 'multi';

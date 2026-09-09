@@ -63,6 +63,7 @@ LUA;
     if (isset($this->locks[$name])) {
       // Extend a lock we believe we hold: one round trip instead of three.
       try {
+        Scripting::clearError($this->client);
         $extended = $this->client->eval(static::EXTEND_LUA, [$key, $id, (int) ($timeout * 1000)], 1);
       }
       catch (\Exception $e) {
@@ -70,6 +71,17 @@ LUA;
           throw $e;
         }
         Scripting::markRefused();
+        return parent::acquire($name, $timeout);
+      }
+      // EXTEND_LUA answers 1 or 0 and never FALSE, so a FALSE is Redis
+      // rejecting the command rather than this process having lost the lock.
+      // Reading it as the latter - which is what happens when FALSE and 0 are
+      // treated alike - made the process drop a lock it still held, and let
+      // nobody else take it either, because the key was never touched.
+      if (Scripting::failedReply($extended)) {
+        if (Scripting::refusedReply($this->client, $extended)) {
+          Scripting::markRefused();
+        }
         return parent::acquire($name, $timeout);
       }
       if (!$extended) {
@@ -101,13 +113,24 @@ LUA;
     unset($this->locks[$name]);
     // One round trip instead of WATCH + GET + MULTI/DEL/EXEC.
     try {
-      $this->client->eval(static::RELEASE_LUA, [$this->getKey($name), $this->getLockId()], 1);
+      Scripting::clearError($this->client);
+      $released = $this->client->eval(static::RELEASE_LUA, [$this->getKey($name), $this->getLockId()], 1);
     }
     catch (\Exception $e) {
       if (!Scripting::refuses($e)) {
         throw $e;
       }
       Scripting::markRefused();
+      parent::release($name);
+      return;
+    }
+    // RELEASE_LUA answers 0 or the result of DEL, so a FALSE means the key was
+    // never looked at. Left alone, the lock stays held until its PX expires and
+    // blocks every other process for that long.
+    if (Scripting::failedReply($released)) {
+      if (Scripting::refusedReply($this->client, $released)) {
+        Scripting::markRefused();
+      }
       parent::release($name);
     }
   }
@@ -134,11 +157,12 @@ LUA;
     // Every held lock released in a single round trip. Each EVAL declares
     // exactly one key, so this stays correct under cluster mode too.
     try {
+      Scripting::clearError($this->client);
       $this->client->pipeline();
       foreach ($names as $name) {
         $this->client->eval(static::RELEASE_LUA, [$this->getKey($name), $id], 1);
       }
-      $this->client->exec();
+      $replies = $this->client->exec();
     }
     catch (\Exception $e) {
       // A pipeline of scripts that times out mid-flight leaves the connection
@@ -153,6 +177,17 @@ LUA;
         return;
       }
       throw $e;
+    }
+
+    // And the same rejection arriving as a reply rather than as an exception,
+    // which is the usual way. Every lock this process holds would otherwise
+    // stay held until its PX ran out.
+    if (Scripting::failedReply($replies)) {
+      if (Scripting::refusedReply($this->client, $replies)) {
+        Scripting::markRefused();
+      }
+      $this->locks = $held;
+      parent::releaseAll($lock_id);
     }
   }
 
