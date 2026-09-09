@@ -160,4 +160,72 @@ class LockScriptRejectedReplyTest extends UnitTestCase {
     $this->assertTrue($lock->lockMayBeAvailable('dos'), 'And still releases.');
   }
 
+  /**
+   * A foreign id frees nothing, with the script and without it.
+   *
+   * The script deletes a key only when its value matches the id it was given.
+   * The inherited method ignores the parameter and frees this process's own
+   * locks whatever it is passed, so delegating straight to it made the same
+   * call with the same argument do opposite things depending on whether the
+   * Redis in front would run a script. There is a kernel test that asserts the
+   * promise against a real Redis; this one pins the path it cannot reach.
+   *
+   * @covers ::releaseAll
+   * @covers ::releaseAllInherited
+   */
+  public function testForeignIdFreesNothingThroughTheFallback(): void {
+    $client = new ScriptFailingClient(new FakeRedisClient());
+    $lock = $this->lock($client);
+
+    $lock->acquire('uno', 3600);
+    $lock->acquire('dos', 3600);
+
+    $lock->releaseAll('un-id-que-no-es-nuestro');
+
+    $this->assertFalse($lock->lockMayBeAvailable('uno'), 'A foreign id must not free uno.');
+    $this->assertFalse($lock->lockMayBeAvailable('dos'), 'A foreign id must not free dos.');
+  }
+
+  /**
+   * The control: our own id, or none at all, does free them.
+   *
+   * Without this, refusing to free anything at all would pass the test above.
+   *
+   * @covers ::releaseAll
+   * @covers ::releaseAllInherited
+   */
+  public function testOwnIdStillFreesThemThroughTheFallback(): void {
+    foreach ([NULL, 'propio'] as $case) {
+      $client = new ScriptFailingClient(new FakeRedisClient());
+      $lock = $this->lock($client);
+      $lock->acquire('uno', 3600);
+
+      $lock->releaseAll($case === 'propio' ? $lock->getLockId() : NULL);
+
+      $this->assertTrue(
+        $lock->lockMayBeAvailable('uno'),
+        'Our own id must still release what we hold.'
+      );
+    }
+  }
+
+  /**
+   * And the same promise on the path that never sends a script at all.
+   *
+   * Scripting::unavailable() returns early, which is a third way into the
+   * inherited method and had the same divergence.
+   *
+   * @covers ::releaseAll
+   */
+  public function testForeignIdFreesNothingWhenScriptingIsKnownUnavailable(): void {
+    $client = new ScriptFailingClient(new FakeRedisClient(), 'ERR unknown command \'EVAL\'', 'Predis');
+    $lock = $this->lock($client);
+    $lock->acquire('uno', 3600);
+    $this->assertTrue(Scripting::unavailable($client), 'This client is never sent scripts.');
+
+    $lock->releaseAll('un-id-que-no-es-nuestro');
+
+    $this->assertFalse($lock->lockMayBeAvailable('uno'), 'Still not theirs to free.');
+  }
+
 }

@@ -145,12 +145,12 @@ LUA;
     if (!$this->locks) {
       return;
     }
+    $held = $this->locks;
     if (Scripting::unavailable($this->client)) {
-      parent::releaseAll($lock_id);
+      $this->releaseAllInherited($held, $lock_id);
       return;
     }
     $names = array_keys($this->locks);
-    $held = $this->locks;
     $this->locks = [];
     $id = $lock_id ?: $this->getLockId();
 
@@ -170,10 +170,7 @@ LUA;
       Pipeline::discard($this->client);
       if (Scripting::refuses($e)) {
         Scripting::markRefused();
-        // ::releaseAll() returns early on an empty list, so put back what this
-        // method emptied before handing over.
-        $this->locks = $held;
-        parent::releaseAll($lock_id);
+        $this->releaseAllInherited($held, $lock_id);
         return;
       }
       throw $e;
@@ -186,9 +183,46 @@ LUA;
       if (Scripting::refusedReply($this->client, $replies)) {
         Scripting::markRefused();
       }
-      $this->locks = $held;
-      parent::releaseAll($lock_id);
+      $this->releaseAllInherited($held, $lock_id);
     }
+  }
+
+  /**
+   * Releases every held lock without Lua, deciding what the script decides.
+   *
+   * Two differences from handing straight over to the inherited method, and
+   * both of them matter now that the fallback is reached by more Redis
+   * configurations than it used to be.
+   *
+   * ::RELEASE_LUA deletes a key only when its value matches the id it was
+   * given, so releaseAll() with somebody else's id frees nothing this process
+   * holds - which is what \Drupal\Tests\redis_rtt\Kernel\LuaRedisLockTest
+   * asserts, and a reasonable thing for a lock backend to promise.
+   * \Drupal\redis\Lock\RedisLock::releaseAll() ignores the parameter
+   * completely and releases this process's own locks whatever it is passed, so
+   * delegating left the same call, with the same argument, doing opposite
+   * things depending on whether the Redis in front of it would run a script.
+   *
+   * And the inherited method returns early on an empty list, so what the caller
+   * emptied has to be put back before handing over.
+   *
+   * @param array<string, bool> $held
+   *   The locks this backend held before the attempt.
+   * @param string|null $lock_id
+   *   The owner id the caller asked for, or NULL for this process's own.
+   */
+  protected function releaseAllInherited(array $held, $lock_id): void {
+    $this->locks = $held;
+
+    if ($lock_id !== NULL && $lock_id !== $this->getLockId()) {
+      // A caller with somebody else's id frees nothing we hold. The script
+      // path forgets them anyway, so this one does too, rather than have the
+      // two disagree about that.
+      $this->locks = [];
+      return;
+    }
+
+    parent::releaseAll($lock_id);
   }
 
 }
