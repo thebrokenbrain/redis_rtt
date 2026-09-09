@@ -23,10 +23,15 @@ parameters:
         #
         # Each list is the minimum that silences a real error, not the module's
         # whole vocabulary - which is what the comment used to claim. Measured
-        # by removing each name and re-running: every name below is load-bearing
-        # in both PHPStan 1.12 and 2.2. Twelve dead ones were removed, eleven of
-        # them from the CountingClient rule, where only the three calls the
-        # tests make directly are seen at all.
+        # by removing each name and re-running, in both PHPStan 1.12 and 2.2,
+        # from a base verified clean first.
+        #
+        # "Load-bearing" is per version, and the two do not agree: ttl is
+        # needed by 1.12 and not by 2.2, which does not look inside the call
+        # site that makes it. A name that only one version needs stays, because
+        # the list has to serve both - reportUnmatchedIgnoredErrors is off below
+        # for exactly this. Do not prune by measuring against one version only;
+        # removing ttl on 2.2's word alone breaks 1.12 with four errors.
         -
             identifier: method.notFound
             message: '#Call to an undefined method Drupal\\redis\\ClientInterface::(clearLastError|close|eval|exec|get|getLastError|getOption|hgetall|mget|multi|pipeline|select|ttl)\(\)#'
@@ -37,7 +42,7 @@ parameters:
         # narrower native type - and which hid what was really silenced.
         -
             identifier: method.notFound
-            message: '#Call to an undefined method Drupal\\redis_rtt\\Client\\CountingClient::(clearLastError|get|getLastError)\(\)#'
+            message: '#Call to an undefined method Drupal\\redis_rtt\\Client\\CountingClient::(clearLastError|close|get|getLastError)\(\)#'
         # LuaRedisLockTest::register() swaps the 'lock' service for this
         # module's backend, which is the whole point of the test. Static
         # analysis reads the type off core's default service definition and

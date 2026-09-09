@@ -324,4 +324,128 @@ class LockScriptRejectedReplyTest extends UnitTestCase {
     $lock->acquire('trabajo', 3600);
   }
 
+  /**
+   * Releasing everything after an unrecognised failure sends one script, not N.
+   *
+   * ::releaseAll() falls back by walking the locks through ::release(), which
+   * is this class's own. On the path where nothing is remembered - a script
+   * that failed for a reason this module does not recognise, deliberately not
+   * treated as "Redis refuses scripts" - each of those walked releases used to
+   * send a fresh EVAL before falling back in its turn: six failed scripts for
+   * three locks, and thirteen round trips where there had been one.
+   *
+   * @covers ::releaseAll
+   * @covers ::releaseAllInherited
+   */
+  public function testReleaseAllRetriesNoScriptPerLock(): void {
+    $client = new ScriptFailingClient(
+      new FakeRedisClient(),
+      'WRONGTYPE Operation against a key holding the wrong kind of value'
+    );
+    $lock = $this->lock($client);
+    $lock->acquire('uno', 3600);
+    $lock->acquire('dos', 3600);
+    $lock->acquire('tres', 3600);
+
+    $lock->releaseAll();
+
+    $this->assertFalse(Scripting::unavailable($client), 'Nothing was remembered, as intended.');
+    // Three: the pipeline sends one script per lock, which is the whole point
+    // of it - three scripts in one round trip. What must not happen is a second
+    // three on the way back out, one per lock, each in its own round trip.
+    $this->assertSame(
+      3,
+      $client->scriptAttempts,
+      'The batch tries once per lock; the fallback must not try again.'
+    );
+    foreach (['uno', 'dos', 'tres'] as $name) {
+      $this->assertTrue($lock->lockMayBeAvailable($name), "And $name was released.");
+    }
+  }
+
+  /**
+   * The status report can tell an operator that scripting was refused.
+   *
+   * A degraded module serves 200s and looks exactly like a healthy one from
+   * outside, so without this there is nowhere at all to find out.
+   *
+   * @covers \Drupal\redis_rtt\Redis\Scripting::wasRefused
+   */
+  public function testRefusalIsVisibleToTheStatusReport(): void {
+    $client = new ScriptFailingClient(new FakeRedisClient());
+    $lock = $this->lock($client);
+    $this->assertFalse(Scripting::wasRefused(), 'Nothing has happened yet.');
+
+    $lock->acquire('uno', 3600);
+    $lock->release('uno');
+
+    $this->assertTrue(Scripting::wasRefused(), 'And now there is something to report.');
+  }
+
+  /**
+   * The lock empties the error slot before each script too.
+   *
+   * Same reasoning as the cache backend: a correct command does not clear the
+   * slot, measured on phpredis and on Relay, so an error from earlier in the
+   * request survives until something empties it. Read as this script's own, it
+   * turns an unrelated failure into "Redis refuses scripts" for the rest of the
+   * request.
+   *
+   * @covers ::release
+   */
+  public function testReleaseClearsTheSlotBeforeSendingItsScript(): void {
+    $client = new ScriptFailingClient(new FakeRedisClient());
+    $client->seedLastError("NOPERM User default has no permissions to run the 'eval' command");
+    $client->recordsReason = FALSE;
+    $lock = $this->lock($client);
+    $lock->acquire('uno', 3600);
+
+    $lock->release('uno');
+
+    $this->assertFalse(
+      Scripting::unavailable($client),
+      'A stale error must not be read as this script being refused.'
+    );
+    $this->assertTrue($lock->lockMayBeAvailable('uno'), 'And the lock was released anyway.');
+  }
+
+  /**
+   * And so does releasing everything at once.
+   *
+   * @covers ::releaseAll
+   */
+  public function testReleaseAllClearsTheSlotBeforeSendingItsScripts(): void {
+    $client = new ScriptFailingClient(new FakeRedisClient());
+    $client->seedLastError("NOPERM User default has no permissions to run the 'eval' command");
+    $client->recordsReason = FALSE;
+    $lock = $this->lock($client);
+    $lock->acquire('uno', 3600);
+    $lock->acquire('dos', 3600);
+
+    $lock->releaseAll();
+
+    $this->assertFalse(Scripting::unavailable($client), 'Nothing refused anything.');
+    $this->assertTrue($lock->lockMayBeAvailable('uno'), 'And both were released.');
+    $this->assertTrue($lock->lockMayBeAvailable('dos'), 'And both were released.');
+  }
+
+  /**
+   * And extending a lock this process holds.
+   *
+   * @covers ::acquire
+   */
+  public function testAcquireClearsTheSlotBeforeSendingItsScript(): void {
+    $client = new ScriptFailingClient(new FakeRedisClient());
+    $client->seedLastError("NOPERM User default has no permissions to run the 'eval' command");
+    $client->recordsReason = FALSE;
+    $lock = $this->lock($client);
+    $lock->acquire('uno', 3600);
+
+    $this->assertTrue($lock->acquire('uno', 3600), 'The extension goes through.');
+    $this->assertFalse(
+      Scripting::unavailable($client),
+      'A stale error must not be read as this script being refused.'
+    );
+  }
+
 }

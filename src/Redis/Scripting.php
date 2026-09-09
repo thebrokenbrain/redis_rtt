@@ -236,6 +236,20 @@ final class Scripting {
   }
 
   /**
+   * Whether a refusal has been seen in this request.
+   *
+   * For the status report, which is the only place an operator can find out.
+   * A degraded module serves 200s and looks exactly like a healthy one from
+   * outside: the two savings that depend on scripting are simply gone.
+   *
+   * @return bool
+   *   TRUE if a script was refused during this request.
+   */
+  public static function wasRefused(): bool {
+    return static::$refused;
+  }
+
+  /**
    * Forgets the refusal.
    *
    * For tests, and for the case where the connection is replaced mid-process:

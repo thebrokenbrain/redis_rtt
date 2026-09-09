@@ -11,24 +11,56 @@ use Drupal\Core\Cache\Cache;
 use Drupal\Core\Site\Settings;
 use Drupal\redis\ClientFactory as RedisClientFactory;
 use Drupal\redis_rtt\Client\PhpRedisRttFactory;
+use Drupal\redis_rtt\Redis\Scripting;
+
+/**
+ * Returns php.ini's socket timeout, for reporting.
+ *
+ * @return string
+ *   The value with its unit, e.g. "60s".
+ */
+function _redis_rtt_socket_timeout(): string {
+  return ((string) ini_get('default_socket_timeout')) . 's';
+}
 
 /**
  * Returns where this module lives, relative to the docroot.
  *
- * Derived from this file rather than asked of the extension list, so that it
- * answers the same outside a built container - a status report is rendered
- * inside one, but hook_requirements() is also called from tests and from
- * install-time code where the service may not be there.
+ * Asked of the extension list first, because that is the only thing that knows
+ * where Drupal found the module rather than where its files ended up. Deriving
+ * it from __FILE__ looks equivalent and is not: PHP resolves symlinks, so with
+ * the module symlinked into the docroot - which is what `composer require` on a
+ * path repository does by default, and what ddev-drupal-contrib does - the
+ * derived path points outside DRUPAL_ROOT and the advice falls back to a
+ * hardcoded guess that names a directory which does not exist. Drupal then
+ * ignores the container_yamls line without a word, drush cr still exits 0, and
+ * the status row says "inactive" for ever.
+ *
+ * The derivation stays as the fallback, for hook_requirements() called from a
+ * test or from install-time code where the service is not there.
  *
  * @return string
  *   The module path, e.g. "modules/contrib/redis_rtt".
  */
 function _redis_rtt_module_path(): string {
+  try {
+    if (\Drupal::hasContainer() && \Drupal::hasService('extension.list.module')) {
+      return \Drupal::service('extension.list.module')->getPath('redis_rtt');
+    }
+  }
+  catch (\Throwable) {
+    // Not installed, or the list cannot be built: fall through.
+  }
+
   $dir = dirname(__FILE__);
   if (defined('DRUPAL_ROOT') && str_starts_with($dir, DRUPAL_ROOT . '/')) {
     return substr($dir, strlen(DRUPAL_ROOT) + 1);
   }
 
+  // Last resort, and the one line here no test can reach: getting to it needs
+  // either no DRUPAL_ROOT or the file outside it, and the suite always runs
+  // with the module inside a docroot. It is a guess, and it is only ever used
+  // where nothing better can be worked out.
   return 'modules/contrib/redis_rtt';
 }
 
@@ -171,12 +203,12 @@ function redis_rtt_requirements(string $phase): array {
       ? t('@count of @total inactive', ['@count' => count($missing), '@total' => count($overrides)])
       : t('All active'),
     'severity' => $missing ? REQUIREMENT_WARNING : REQUIREMENT_OK,
-    // The path is read from the extension list rather than written out. A
-    // hardcoded modules/contrib/... is wrong wherever Composer or a hand
-    // install put the module somewhere else, and Drupal ignores a
-    // container_yamls entry that does not exist without saying anything: the
-    // advice then does nothing, drush cr still exits 0, and this row goes on
-    // saying "inactive" for ever.
+    // The path is asked for rather than written out. A hardcoded
+    // modules/contrib/... is wrong wherever Composer or a hand install put the
+    // module somewhere else, and Drupal ignores a container_yamls entry that
+    // does not exist without saying anything: the advice then does nothing,
+    // drush cr still exits 0, and this row goes on saying "inactive" for ever.
+    // @see _redis_rtt_module_path()
     'description' => $missing ? t(
       'Inactive: @list. Add the module\'s service overrides to settings.php: <code>$settings["container_yamls"][] = "@path/redis_rtt.services.example.yml";</code>',
       [
@@ -222,8 +254,20 @@ function redis_rtt_requirements(string $phase): array {
   if ($client !== NULL && str_starts_with(strtolower($client), 'predis')) {
     $connection_notes[] = t('The client is Predis, whose <code>eval()</code> takes its arguments in a different order from phpredis. This module therefore does not send it any Lua, and the two optimisations that depend on scripting - single round-trip cache invalidation and single round-trip lock release - fall back to the same commands the redis module would send. Everything still works; those two savings do not apply. Switch to phpredis to get them.');
   }
+  // A Redis that will not run Lua degrades this module instead of breaking it,
+  // and from outside a degraded site looks exactly like a healthy one: 200s all
+  // round, nothing in the log, two savings quietly gone. This row is the only
+  // place it shows. It reports what happened in THIS request, because the flag
+  // does not outlive one - so rendering the status page tells you about the
+  // status page, and the note names how to check it properly.
+  if (Scripting::wasRefused()) {
+    $connection_notes[] = t('Redis refused to run a Lua script during this request, so the two optimisations that depend on scripting - single round-trip cache invalidation and single round-trip lock release - fell back to the same commands the redis module would send. The site works; those two savings do not apply. This usually means scripting is out of the ACL, or <code>EVAL</code> has been renamed. Note that this is reported per request: a page that sends no script will not show it, so check with <code>drush php:eval</code> against a page that invalidates.');
+  }
   if ($client !== NULL && !str_starts_with($client, 'PhpRedisRtt')) {
-    $connection_notes[] = t('The connection is @client rather than PhpRedisRtt, so no read timeout is configured. The PHP default is unlimited, which means a connection dropped by a failover blocks the worker until the FPM request timeout.', ['@client' => $client]);
+    $connection_notes[] = t('The connection is @client rather than PhpRedisRtt, so this module configures no read timeout and phpredis falls back to the <code>default_socket_timeout</code> of php.ini, currently @stock. A connection dropped by a failover then holds its PHP worker for that long - twice that, in fact, for a request that opens a second connection after the first one fails.', [
+      '@client' => $client,
+      '@stock' => _redis_rtt_socket_timeout(),
+    ]);
   }
   // The read timeout is the module's most consequential connection setting and
   // the one nobody thinks about until a failover. Report the number, not just
@@ -243,9 +287,9 @@ function redis_rtt_requirements(string $phase): array {
         break;
 
       case 'stock':
-        $connection_info[] = $resolved['timeout'] > 0
-          ? t('Reads give up after @seconds s, which is the stock behaviour: <code>$settings["redis.connection"]["read_timeout"]</code> is 0 or less, so php.ini\'s <code>default_socket_timeout</code> applies, exactly as it would without this module. Set a positive number to bound reads more tightly than that.', ['@seconds' => $resolved['timeout']])
-          : t('Reads have no time limit at all: <code>$settings["redis.connection"]["read_timeout"]</code> is 0 or less and php.ini\'s <code>default_socket_timeout</code> is unlimited too, so a Redis that stops answering will hold its PHP worker until the request timeout. Set a positive number to bound them.');
+        $connection_info[] = t('Reads are left exactly as they would be without this module: <code>$settings["redis.connection"]["read_timeout"]</code> is 0 or less, so nothing is configured on the connection and phpredis uses the <code>default_socket_timeout</code> of php.ini, currently @stock. Note that a value of 0 there means reads expire immediately, and a negative one means never. Set a positive <code>read_timeout</code> to bound reads regardless of php.ini.', [
+          '@stock' => _redis_rtt_socket_timeout(),
+        ]);
         break;
 
       default:

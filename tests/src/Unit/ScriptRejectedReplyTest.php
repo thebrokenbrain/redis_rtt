@@ -313,4 +313,70 @@ class ScriptRejectedReplyTest extends UnitTestCase {
     );
   }
 
+  /**
+   * A reply set shifted by one does not yield a flush marker either.
+   *
+   * This is the shape a desynchronised socket actually produces - same length,
+   * contents one position late - and the count check cannot see it. What
+   * refuses it is that every reply but the marker is a hash, so the shift puts
+   * an array where the timestamp belongs and is_scalar() throws it out.
+   *
+   * @covers \Drupal\redis_rtt\Cache\PipeliningRedisBackend::getMultiple
+   */
+  public function testShiftedReplySetYieldsNoMarker(): void {
+    $client = new ShiftedReplyClient(new FakeRedisClient());
+    $checksum = $this->createMock(CacheTagsChecksumInterface::class);
+    $checksum->method('isValid')->willReturn(TRUE);
+    $construir = static function () use ($client, $checksum): PipeliningRedisBackend {
+      $b = new PipeliningRedisBackend('render', $client, $checksum, new PhpSerialize());
+      $b->setPrefix('p');
+      return $b;
+    };
+
+    $construir()->set('uno', 'V1');
+    $construir()->deleteAll();
+
+    $reader = $construir();
+    $client->shifted = TRUE;
+    $cids = ['uno'];
+    $reader->getMultiple($cids);
+
+    $this->assertFalse(
+      $reader->get('uno'),
+      'A flush that really happened must stay honoured after a shifted read.'
+    );
+  }
+
+  /**
+   * The error slot is emptied before each script, by the code and not by hand.
+   *
+   * ::refusedReply() is only trustworthy if the slot was cleared just before
+   * the script went out - a correct command does not clear it, measured on
+   * phpredis and on Relay, so an error from earlier in the request survives
+   * indefinitely. Every call site could drop that call with the suite green,
+   * because the only test that pinned it called ::clearError() itself.
+   *
+   * @covers \Drupal\redis_rtt\Cache\PipeliningRedisBackend::invalidateMultiple
+   */
+  public function testInvalidateClearsTheSlotBeforeSendingItsScript(): void {
+    [$backend, $client] = $this->backend();
+    $backend->set('uno', 'V1');
+
+    // Something unrelated left a refusal-shaped error behind. Then this script
+    // fails for its own reason and leaves the slot alone, which is what a
+    // connection-state FALSE from ::exec() does. Without the clear, the stale
+    // message is what gets read, and the module switches Lua off for the rest
+    // of the request over something that never refused anything.
+    $client->seedLastError("NOPERM User default has no permissions to run the 'eval' command");
+    $client->recordsReason = FALSE;
+
+    $backend->invalidateMultiple(['uno']);
+
+    $this->assertFalse(
+      Scripting::unavailable($client),
+      'A stale error must not be read as this script being refused.'
+    );
+    $this->assertFalse($backend->get('uno'), 'And the entry was invalidated anyway.');
+  }
+
 }

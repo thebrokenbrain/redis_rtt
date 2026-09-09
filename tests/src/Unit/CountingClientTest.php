@@ -310,10 +310,14 @@ class CountingClientTest extends UnitTestCase {
 
     $client->clearLastError();
     $client->getLastError();
+    // close() drops a socket without telling Redis anything: measured with
+    // MONITOR, it sends nothing. It was the one figure the counter got wrong,
+    // inflating every Pipeline::discard() by one wait.
+    $client->close();
 
-    $this->assertSame(0, CountingClient::$roundTrips, 'Neither is a wait.');
-    $this->assertSame(0, CountingClient::$commands, 'Neither is a command.');
-    $this->assertSame([], CountingClient::$byCommand, 'And neither shows up in the breakdown.');
+    $this->assertSame(0, CountingClient::$roundTrips, 'None of them is a wait.');
+    $this->assertSame(0, CountingClient::$commands, 'None of them is a command.');
+    $this->assertSame([], CountingClient::$byCommand, 'And none shows up in the breakdown.');
 
     // The control: something that really is a command does get counted.
     $client->get('k');

@@ -132,8 +132,11 @@ The `addPsr4()` call is only for installations that did not come through
 Composer. The classes named below are loaded before Drupal registers module
 namespaces, so something has to know where they live; `composer.json` declares
 `autoload.psr-4`, which covers it for a Composer install. If the module was
-unpacked by hand, keep the call - without it every page is a 500 and `drush`
-cannot boot either. `$class_loader` is in scope inside `settings.php`.
+unpacked by hand, keep the call. Without it the classes named below cannot be
+found: with `bootstrap_container_definition` in use that is a 500 on every page
+and a `drush` that will not boot, and without it the failure is narrower - the
+site keeps serving and the pieces that need those classes are simply inactive,
+which the status report says. Either way the fix is the same line. `$class_loader` is in scope inside `settings.php`.
 
 `redis.services.yml` has to come first, and it is the line most easily missed.
 Every service this module defines takes `@redis.factory` as an argument, and

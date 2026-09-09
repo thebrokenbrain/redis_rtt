@@ -113,13 +113,28 @@ LUA;
       throw $e;
     }
 
-    // ::exec() answers FALSE rather than raising for several connection states,
-    // and a reply set can come back shorter than what was queued. Reading a
-    // timestamp out of either is how the marker silently became 0.0 or 1.0 -
-    // both of them 1970, both of them meaning "this bin was never emptied",
-    // which would serve entries a flush was supposed to have retired. An
-    // absent marker legitimately means that; a reply set that did not come back
-    // whole means nothing at all, and has to be treated as unknown.
+    // Reading a timestamp out of a reply set that is not what was asked for is
+    // how the marker silently became 0.0 or 1.0 - both of them 1970, both of
+    // them meaning "this bin was never emptied", which would serve entries a
+    // flush was supposed to have retired. An absent marker legitimately means
+    // that; a reply set that did not come back whole means nothing at all.
+    //
+    // Two rounds of measuring have narrowed what "not whole" can actually be,
+    // and the honest answer is that the count check below defends a contract
+    // rather than an observed failure. ::exec() does answer FALSE instead of
+    // raising for several connection states, and that is real. But a set that
+    // is *shorter* than the queue does not happen: phpredis 5.3.7 and 6.3.0
+    // raise instead. Nor does a *longer* one: with a queue genuinely dragged in
+    // from earlier on the socket, phpredis and Relay both read exactly as many
+    // replies as commands were queued, and the leftover arrives at the front,
+    // so the set is the right length with its contents shifted by one.
+    //
+    // That shifted shape is the one that can happen, and it is is_scalar()
+    // below that stops it, not the count: every reply but the marker is an
+    // HGETALL, so a shift puts an array where the timestamp should be and it is
+    // refused. The count check stays because it is free and because a client
+    // that did answer short or long would otherwise be believed, but it is not
+    // what is doing the work here.
     $replies = is_array($replies) ? $replies : [];
     $intact = count($replies) === $expected;
 

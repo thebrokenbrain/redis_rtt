@@ -6,6 +6,7 @@ namespace Drupal\Tests\redis_rtt\Kernel;
 
 use Drupal\KernelTests\KernelTestBase;
 use Drupal\redis\ClientInterface;
+use Drupal\redis\Client\PhpRedisFactory;
 use Drupal\redis_rtt\Client\PhpRedisRttFactory;
 
 /**
@@ -153,23 +154,33 @@ class PhpRedisRttConnectionTest extends KernelTestBase {
    */
   public function testReadTimeoutOfZeroLeavesWorkingConnection(): void {
     $client = (new PhpRedisRttFactory())->getClient($this->settings(['read_timeout' => 0]));
-    $stock = (float) ini_get('default_socket_timeout');
-
     $this->assertSame(
       'v',
       $this->roundTrip($client),
       'Asking for the stock behaviour must not take the site down: this is the read that used to fail.',
     );
-    $in_force = (float) $client->getOption(\Redis::OPT_READ_TIMEOUT);
-    $this->assertNotSame(
-      0.0,
-      $in_force,
-      'A literal 0.0 is what breaks the next read, so it must never reach the connection.',
-    );
+    // Compared against the stock factory rather than against a number, because
+    // "the stock behaviour" is defined by what that factory leaves behind and
+    // not by what php.ini says: phpredis reports an unconfigured read timeout
+    // as 0.0 whatever default_socket_timeout holds, and uses the ini value
+    // internally. Asserting on the ini value would fail while the connection
+    // was in fact identical.
+    $stock_client = (new PhpRedisFactory())->getClient($this->settings());
+
     $this->assertSame(
-      $stock > 0 ? $stock : -1.0,
-      $in_force,
-      'Zero asks for what the site would do without this module, which is default_socket_timeout.',
+      (float) $stock_client->getOption(\Redis::OPT_READ_TIMEOUT),
+      (float) $client->getOption(\Redis::OPT_READ_TIMEOUT),
+      'Zero must leave the connection exactly as the stock factory would.',
+    );
+
+    // And the control, so this is not two identical mistakes agreeing: a
+    // positive setting does change it, and away from what stock has.
+    $bounded = (new PhpRedisRttFactory())->getClient($this->settings(['read_timeout' => 2.5]));
+    $this->assertEqualsWithDelta(
+      2.5,
+      (float) $bounded->getOption(\Redis::OPT_READ_TIMEOUT),
+      0.001,
+      'A positive read timeout is configured, and this test can tell the difference.',
     );
   }
 

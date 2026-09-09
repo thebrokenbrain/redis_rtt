@@ -9,15 +9,21 @@ use Drupal\redis\ClientInterface;
 /**
  * A client whose pipeline answers with more replies than were queued.
  *
- * The shape phpredis produces when a queue is dragged in from earlier on the
- * same socket: ::exec() hands back the leftovers along with the answers, so the
- * reply set is longer than what this request asked for.
+ * A reply set longer than the queue, which is a shape no supported client has
+ * been observed to produce. Measured against a TCP proxy that drags a real
+ * queue in from earlier on the socket, phpredis 5.3.7, phpredis 6.3.0 and Relay
+ * 0.40.0 all read exactly as many replies as commands were queued, and the
+ * leftover arrives at the front: the set is the right length with its contents
+ * shifted by one. See \Drupal\Tests\redis_rtt\Unit\ShiftedReplyClient for
+ * that one.
  *
- * The leftover goes last, which is the position that does the damage, because
- * the marker is taken with array_pop(). A leftover at the front is harmless -
- * it is skipped for not being an array and the pop still finds the real marker
- * - so a double that put it there would exercise the count check without ever
- * making it matter, and every mutation of that check would survive.
+ * So this double pins a contract rather than a scenario: if a client ever did
+ * hand back more replies than were asked for, the marker must not be read out
+ * of them. The leftover goes last because that is where it would do damage -
+ * array_pop() would take it as the timestamp. An earlier version of this
+ * docblock claimed this was what phpredis does, which was wrong, and the
+ * measurement that showed it also showed which check actually protects the
+ * marker in the shape that can happen: is_scalar(), not the count.
  */
 final class OverlongReplyClient implements ClientInterface {
 

@@ -82,10 +82,12 @@ class CountingClient implements ClientInterface {
   public function __call(string $name, array $arguments) {
     $lower = strtolower($name);
 
-    // Local to the extension, not commands: they read and clear a slot in the
-    // client. Counting them would add a wait per script this module sends and
-    // make the instrument report traffic that never left the process.
-    if ($lower === 'getlasterror' || $lower === 'clearlasterror') {
+    // Local to the extension, not commands: they read or clear a slot in the
+    // client, or drop a socket. Counting them would report traffic that never
+    // left the process - a wait per script for the error slot, and one per
+    // Pipeline::discard() for the close, which was the one figure the counter
+    // got wrong: measured with MONITOR, close() sends nothing to Redis.
+    if ($lower === 'getlasterror' || $lower === 'clearlasterror' || $lower === 'close') {
       return $this->inner->__call($name, $arguments);
     }
 

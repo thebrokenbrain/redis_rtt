@@ -135,67 +135,65 @@ class SentinelConnectionTest extends UnitTestCase {
   }
 
   /**
-   * A read timeout of zero asks for the stock behaviour, which is not "none".
+   * A read timeout of zero leaves the connection unconfigured, like stock.
    *
    * An operator writing 0 is asking for what the site would do without this
-   * module. That is not an unbounded read: the stock factory passes no read
-   * timeout and never calls ::setOption(), which leaves phpredis on php.ini's
-   * default_socket_timeout - 60 seconds out of the box. Handing back a negative
-   * value here removed even that, and measured against a Redis deaf for 20
-   * seconds with default_socket_timeout at 3, stock gave up after 6.09 s while
-   * this held its worker for the whole 20.26 s: worse than the thing it was
-   * imitating, from a setting whose documentation promised the opposite.
+   * module, and the only way to mean that exactly is to do what the stock
+   * factory does: hand ::pconnect() the 0.0 that omitting the parameter gives,
+   * and never call ::setOption(). phpredis then reads php.ini's
+   * default_socket_timeout at connect time.
    *
-   * What must still never come back is a literal 0.0. Passing that is not the
-   * same code path as leaving the parameter out: on phpredis 6.3.0 the first
-   * read then fails with "socket error on read socket", so every request raised
-   * a RedisException and every page was an HTTP 500, against a stock twin on
-   * the same Redis serving 200.
+   * Two earlier attempts translated it instead, and each was wrong somewhere.
+   * -1.0 removed even php.ini's bound: with default_socket_timeout at 3 and a
+   * Redis deaf for 20 seconds, stock gave up after 6.09 s and this held its
+   * worker the whole 20.26 s. Copying php.ini's number in fixed that and broke
+   * default_socket_timeout = 0, which is not "unlimited" but a select() that
+   * expires at once: there stock served every request in under 120 ms while
+   * this held all six pool workers for 40 s.
    *
    * @dataProvider providerNonPositiveReadTimeouts
    */
   public function testNonPositiveReadTimeoutMeansStockBehaviour(mixed $configured): void {
     $factory = new RecordingPhpRedisRttFactory();
-    $stock = (float) ini_get('default_socket_timeout');
-    $expected = $stock > 0 ? $stock : -1.0;
+    $settings = ['host' => '127.0.0.1', 'port' => 6379, 'read_timeout' => $configured];
 
-    $resolved = $factory->readTimeoutFor(['host' => '127.0.0.1', 'port' => 6379, 'read_timeout' => $configured]);
+    $resolved = PhpRedisRttFactory::resolveReadTimeout($settings);
 
+    $this->assertSame('stock', $resolved['state'], 'Zero or less is the stock state.');
     $this->assertSame(
-      $expected,
-      $resolved,
-      'Zero or less must mean what the site would do without this module.',
-    );
-    $this->assertNotSame(
       0.0,
-      $resolved,
-      'And never a literal 0.0, which is the value that breaks the next read.',
+      $resolved['timeout'],
+      'And stock is the 0.0 that omitting the parameter gives, not a translation of php.ini.',
     );
+    $this->assertSame(0.0, $factory->readTimeoutFor($settings), 'Same value through the factory.');
   }
 
   /**
-   * When php.ini itself says "unlimited", that is what gets passed on.
+   * Nothing is configured on the connection in the stock state.
    *
-   * A default_socket_timeout of 0 or less is the one case that genuinely means
-   * no limit, and -1.0 is how phpredis is told so: 0.0 breaks the next read.
+   * The value alone does not say it: 0.0 has to reach ::pconnect() *and*
+   * ::setOption() has to be skipped, because setOption(OPT_READ_TIMEOUT, 0.0)
+   * makes the next read fail with "socket error on read socket".
    */
-  public function testStockOfZeroBecomesTheNegativeValue(): void {
-    $factory = new RecordingPhpRedisRttFactory();
-    $original = ini_get('default_socket_timeout');
+  public function testTheStockStateSkipsSetOption(): void {
+    $method = (new \ReflectionClass(PhpRedisRttFactory::class))->getMethod('resolveReadTimeout');
+    $method->setAccessible(TRUE);
 
-    try {
-      foreach (['0', '-1'] as $unlimited) {
-        ini_set('default_socket_timeout', $unlimited);
-        $this->assertSame(
-          -1.0,
-          $factory->readTimeoutFor(['host' => '127.0.0.1', 'port' => 6379, 'read_timeout' => 0]),
-          "With default_socket_timeout at $unlimited there is no bound to pass on, and 0.0 is not how that is said.",
-        );
-      }
+    foreach ([0, -1, '0'] as $configured) {
+      $this->assertSame(
+        'stock',
+        $method->invoke(NULL, ['read_timeout' => $configured])['state'],
+        'Every non-positive value has to reach the state that skips it.',
+      );
     }
-    finally {
-      ini_set('default_socket_timeout', (string) $original);
+    foreach ([2.5, '1'] as $configured) {
+      $this->assertSame(
+        'bounded',
+        $method->invoke(NULL, ['read_timeout' => $configured])['state'],
+        'And a positive one must not.',
+      );
     }
+    $this->assertSame('default', $method->invoke(NULL, [])['state']);
   }
 
   /**

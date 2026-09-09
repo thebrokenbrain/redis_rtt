@@ -39,6 +39,20 @@ final class ScriptFailingClient implements ClientInterface {
   protected string $lastError = '';
 
   /**
+   * Whether EVAL still fails. Turn it off to run a script that works.
+   */
+  public bool $failScripts = TRUE;
+
+  /**
+   * Whether a failing script also writes its reason into the slot.
+   *
+   * ::exec() answering FALSE for a connection state is a failure that leaves
+   * the slot exactly as it found it, which is how a stale error from earlier in
+   * the request gets read as this script's own.
+   */
+  public bool $recordsReason = TRUE;
+
+  /**
    * Whether a pipeline is open.
    */
   protected bool $piping = FALSE;
@@ -130,8 +144,13 @@ final class ScriptFailingClient implements ClientInterface {
   protected function one(string $name, array $arguments) {
     if ($name === 'eval') {
       $this->scriptAttempts++;
-      $this->lastError = $this->error;
-      return FALSE;
+      if ($this->failScripts) {
+        if ($this->recordsReason) {
+          $this->lastError = $this->error;
+        }
+        return FALSE;
+      }
+      return $this->inner->__call($name, $arguments);
     }
 
     return $this->inner->__call($name, $arguments);

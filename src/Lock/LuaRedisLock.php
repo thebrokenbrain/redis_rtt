@@ -28,6 +28,15 @@ use Drupal\redis_rtt\Redis\Scripting;
 class LuaRedisLock extends RedisLock {
 
   /**
+   * Whether ::release() must go straight to the inherited path.
+   *
+   * Set only while ::releaseAllInherited() is walking the locks, so that a
+   * decision already taken for the batch is not re-taken, and re-paid, once per
+   * lock. @see ::releaseAllInherited()
+   */
+  protected bool $skipScripts = FALSE;
+
+  /**
    * Deletes the key only if this process still owns it.
    */
   protected const RELEASE_LUA = <<<'LUA'
@@ -106,7 +115,7 @@ LUA;
    *   The lock name.
    */
   public function release($name): void {
-    if (Scripting::unavailable($this->client)) {
+    if ($this->skipScripts || Scripting::unavailable($this->client)) {
       parent::release($name);
       return;
     }
@@ -222,7 +231,19 @@ LUA;
       return;
     }
 
-    parent::releaseAll($lock_id);
+    // ::releaseAll() walks the locks calling ::release(), which is this class's
+    // own. With nothing remembered - the path taken when a script failed for a
+    // reason this module does not recognise - each of those would send a fresh
+    // EVAL before falling back in its turn: for three locks, six failed scripts
+    // and thirteen round trips instead of one. The answer is already known
+    // here, so it is not asked again.
+    $this->skipScripts = TRUE;
+    try {
+      parent::releaseAll($lock_id);
+    }
+    finally {
+      $this->skipScripts = FALSE;
+    }
   }
 
 }
