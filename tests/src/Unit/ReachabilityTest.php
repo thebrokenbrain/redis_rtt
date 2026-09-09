@@ -76,12 +76,15 @@ class ReachabilityTest extends UnitTestCase {
    */
   public function testCountingClientDelegatesTheInterfaceMethods(): void {
     $inner = $this->createMock(ClientInterface::class);
-    $inner->expects($this->once())->method('scan')->with('p:*', 50)->willReturn(['una']);
+    // ::scan() answers with a generator, not an array: asserting on an array
+    // passes against a mock and is statically impossible against the contract.
+    $inner->expects($this->once())->method('scan')->with('p:*', 50)
+      ->willReturnCallback(static fn (): \Generator => yield from ['una']);
     $inner->expects($this->once())->method('info')->willReturn(['redis_version' => '7.0']);
     $inner->expects($this->once())->method('addIgnorePattern')->with('p:ruido');
     $client = new CountingClient($inner);
 
-    $this->assertSame(['una'], $client->scan('p:*', 50));
+    $this->assertSame(['una'], iterator_to_array($client->scan('p:*', 50)));
     $this->assertSame(['redis_version' => '7.0'], $client->info());
     $client->addIgnorePattern('p:ruido');
   }
