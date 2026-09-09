@@ -10,9 +10,14 @@ use Drupal\redis\ClientInterface;
  * Cleanup for a pipeline that failed while its replies were still in flight.
  *
  * Everything in this module that opens a pipeline needs this, which is why it
- * does not live on any one of them:
+ * does not live on any one of them. There are three:
+ * \Drupal\redis_rtt\Cache\PipeliningRedisBackend::getMultiple(),
  * \Drupal\redis_rtt\Cache\PipeliningRedisBackend::invalidateMultiple() and
  * \Drupal\redis_rtt\Lock\LuaRedisLock::releaseAll().
+ *
+ * The first of those is the hottest path in the module and was, until round 13,
+ * the one place that did not route its failure here - while this sentence
+ * claimed "everything".
  */
 final class Pipeline {
 

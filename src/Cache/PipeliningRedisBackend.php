@@ -93,26 +93,58 @@ LUA;
     // backend fetches it lazily from ::expandEntry(), which costs a separate
     // round trip per bin.
     $needs_last_delete = $this->lastDeleteAll === NULL;
+    $expected = count($keys) + ($needs_last_delete ? 1 : 0);
 
     // Always at least one key here: an empty $cids returned above.
-    $this->client->pipeline();
-    foreach ($keys as $key) {
-      $this->client->hgetall($key);
+    try {
+      $this->client->pipeline();
+      foreach ($keys as $key) {
+        $this->client->hgetall($key);
+      }
+      if ($needs_last_delete) {
+        $this->client->get($this->getKey(static::LAST_DELETE_ALL_KEY));
+      }
+      $replies = $this->client->exec();
     }
-    if ($needs_last_delete) {
-      $this->client->get($this->getKey(static::LAST_DELETE_ALL_KEY));
+    catch (\Exception $e) {
+      // The hottest pipeline in the module, and it used to be the only one
+      // without this. See Pipeline::discard().
+      Pipeline::discard($this->client);
+      throw $e;
     }
-    $result = $this->client->exec() ?: [];
 
-    if ($needs_last_delete) {
+    // ::exec() answers FALSE rather than raising for several connection states,
+    // and a reply set can come back shorter than what was queued. Reading a
+    // timestamp out of either is how the marker silently became 0.0 or 1.0 -
+    // both of them 1970, both of them meaning "this bin was never emptied",
+    // which would serve entries a flush was supposed to have retired. An
+    // absent marker legitimately means that; a reply set that did not come back
+    // whole means nothing at all, and has to be treated as unknown.
+    $replies = is_array($replies) ? $replies : [];
+    $intact = count($replies) === $expected;
+
+    $marker = NULL;
+    if ($needs_last_delete && $intact) {
       // The marker is the last reply in the pipeline.
-      $this->lastDeleteAll = (float) array_pop($result);
+      $marker = array_pop($replies);
     }
 
-    foreach ($result as $values) {
-      if (is_array($values)) {
+    foreach ($replies as $values) {
+      // A miss answers with an empty array. Anything that is not an array is
+      // the marker, left in place because the reply set was not whole.
+      if (is_array($values) && $values) {
         $rows[] = $values;
       }
+    }
+
+    // Adopted only when there is something to judge with it. The stock backend
+    // fetches this lazily from ::expandEntry(), which never runs without rows,
+    // so on a pure miss it holds no opinion and sees a deleteAll() that arrives
+    // afterwards. Taking the marker there anyway made this module blind to that
+    // flush for the rest of the request, which is a difference from stock that
+    // buys nothing: with no rows there was no round trip to save.
+    if ($needs_last_delete && $rows !== [] && is_scalar($marker)) {
+      $this->lastDeleteAll = (float) $marker;
     }
 
     // Register every returned tag for preloading before validating any single
@@ -170,6 +202,22 @@ LUA;
     }
     if (!$items) {
       return;
+    }
+
+    // A write supersedes a delete that has not happened yet. Inside a database
+    // transaction ::deleteMultiple() defers the delete to the commit and, until
+    // then, ::expandEntry() refuses to serve any cache ID on that list. So
+    // writing an already-expired entry and then writing the same cache ID
+    // properly - which is what a hook that caches "until an hour after the last
+    // change" does inside an entity save - left the good value unreadable for
+    // the rest of the transaction and deleted at commit.
+    //
+    // The stock backend never hits this, but only by accident: it queues the
+    // already-prefixed key, which ::deleteMultiple() prefixes again, so the
+    // entry it means to remove is never touched and never matches. Fixing that
+    // double prefix is what exposed the deferral underneath it.
+    if ($this->delayedDeletions) {
+      $this->delayedDeletions = array_values(array_diff($this->delayedDeletions, array_keys($items)));
     }
 
     parent::setMultiple($items);

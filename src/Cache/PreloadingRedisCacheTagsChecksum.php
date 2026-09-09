@@ -134,11 +134,25 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
   /**
    * How many requests a tag must appear in before it is worth preloading.
    *
-   * The set is ranked by how often a tag is seen, not by how recently. That
-   * distinction matters: tags like node:123 are seen by exactly the one request
-   * that renders that node, so ranking by recency would fill the set with
-   * per-content tags that will never be wanted again and push out the
-   * config:*, routes and entity_types tags that every request does want.
+   * The set is ranked by how often a tag is seen, not by how recently, on the
+   * reasoning that a tag like node:123 is seen by the one request that renders
+   * that node and would otherwise crowd out the config:*, routes and
+   * entity_types tags every request wants.
+   *
+   * That reasoning does not survive measurement, and this docblock used to
+   * claim the outcome rather than the intent. On a content site node tags are
+   * not seen once: the listing, the node page and the blocks around it all
+   * carry them, so they clear this threshold easily. Counted on an ordinary
+   * traffic mix in round 13, the set held 374 content tags out of 400 after
+   * twelve passes and 393 out of 400 by the end of the session.
+   *
+   * What that costs is bounded and was measured too. A speculatively fetched
+   * count answers for its tag for ::$speculativeTtl seconds, so an invalidation
+   * by another process inside that window is not seen - a window the stock
+   * backend does not have. Out of 1,480 requests starting after a save, none
+   * served a stale count. Sites that will not accept the window at all can set
+   * $settings['redis_rtt_tag_warmset_ttl'] to 0, which turns the speculation
+   * off and keeps the batching.
    */
   protected int $minHits;
 

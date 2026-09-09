@@ -73,6 +73,36 @@ class PipelineDiscardTest extends UnitTestCase {
   }
 
   /**
+   * The read path closes its connection too, which it used not to.
+   *
+   * ::getMultiple() is the pipeline this module opens most often, and it was
+   * the only one of the three without this. The docblock on the class being
+   * covered said "everything in this module" and listed the other two.
+   *
+   * @covers ::discard
+   */
+  public function testFailedReadPipelineClosesItsConnection(): void {
+    $client = new FailingPipelineClient();
+    $checksum = $this->createMock(CacheTagsChecksumInterface::class);
+    $backend = new PipeliningRedisBackend('render', $client, $checksum, new PhpSerialize());
+    $backend->setPrefix('p');
+
+    $cids = ['uno', 'dos'];
+    try {
+      $backend->getMultiple($cids);
+      $this->fail('The failure must propagate.');
+    }
+    catch (\RuntimeException) {
+      // Expected.
+    }
+
+    $this->assertTrue(
+      $client->closed,
+      'A read that failed mid-pipeline must not hand its connection on.'
+    );
+  }
+
+  /**
    * Releasing every lock at once has the same failure path.
    *
    * @covers ::discard
