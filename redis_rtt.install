@@ -34,7 +34,8 @@ function redis_rtt_requirements(string $phase): array {
   // Checked at install as well as at runtime, and as an error, because getting
   // this wrong is not a degraded site: every class in src/Cache extends one
   // that only exists in redis 2.x, so on 1.x the container cannot be built and
-  // every page is a blank 200 with a class-not-found in the log.
+  // every page is a 500 with a class-not-found in the log, under php -S and
+  // under nginx with PHP-FPM alike.
   //
   // It is easy to get wrong by accident. redis_rtt.info.yml can only say
   // "redis:redis" - Drupal compares "8.x-1.11" as greater than "2.0", so a

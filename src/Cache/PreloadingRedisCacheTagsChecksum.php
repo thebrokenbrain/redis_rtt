@@ -154,13 +154,24 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
    * traffic mix in round 13, the set held 374 content tags out of 400 after
    * twelve passes and 393 out of 400 by the end of the session.
    *
-   * What that costs is bounded and was measured too. A speculatively fetched
-   * count answers for its tag for ::$speculativeTtl seconds, so an invalidation
-   * by another process inside that window is not seen - a window the stock
-   * backend does not have. Out of 1,480 requests starting after a save, none
-   * served a stale count. Sites that will not accept the window at all can set
-   * $settings['redis_rtt_tag_warmset_ttl'] to 0, which turns the speculation
-   * off and keeps the batching.
+   * What that costs is bounded, and the bound is the thing to understand rather
+   * than the sample. A speculatively fetched count answers for its tag for
+   * ::$speculativeTtl seconds, so an invalidation by another process inside
+   * that window is not seen - a window the stock backend does not have. It is
+   * not theoretical: two processes and one entry reproduce it deterministically
+   * inside the window, and reliably miss it outside. What a sample of 1,480 web
+   * requests after a save showed was that none of them landed inside it, which
+   * says the window is short against a web request and says nothing about a
+   * cron run, a queue worker or a migration, where the gap between the
+   * speculative read and its use is exactly as long as the TTL allows.
+   *
+   * Sites that will not accept the window can set
+   * $settings['redis_rtt_tag_warmset_ttl'] to 0. That turns the speculation off
+   * and, with it, the part of the batching this class is named for: a
+   * speculatively read count is never used, so every tag costs its own round
+   * trip again, the same number the stock backend spends. What survives is the
+   * grouping of tags that already arrived in one call. Any positive value,
+   * 0.001 included, keeps the rest.
    */
   protected int $minHits;
 

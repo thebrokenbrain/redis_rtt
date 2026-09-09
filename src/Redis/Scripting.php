@@ -26,10 +26,21 @@ use Drupal\redis\ClientInterface;
  * the same commands the stock backend would have sent. The site keeps working
  * and loses only the round trips the script was saving.
  *
- * The flag is per process rather than per object because the connection is:
- * \Drupal\redis\ClientFactory holds one client in a static and hands it to
- * every bin, to the tag checksums and to the lock. One refusal answers for all
- * of them.
+ * The flag is per request, not per process, whatever the word "static"
+ * suggests: PHP throws away class statics between requests, so a worker that
+ * learned the answer on one request asks again on the next. That is the right
+ * trade rather than an oversight - a failover can put a differently configured
+ * Redis behind the same pooled connection, and a flag that outlived the request
+ * would keep a whole worker on the slow path until it was recycled - but the
+ * cost is one rejected EVAL per request, which is why ::unavailable() also
+ * decides up front where it can.
+ *
+ * It is per request rather than per object because the connection is shared:
+ * the redis module's client factory hands one client to every bin, to the tag
+ * checksums and to the lock, so one refusal answers for all of them. Note that
+ * the factory holds it in an instance property on drupal/redis 2.0.0-alpha2 and
+ * in a static on its development branch; either way there is one per request,
+ * which is what this relies on.
  */
 final class Scripting {
 
