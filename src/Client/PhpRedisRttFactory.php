@@ -32,7 +32,7 @@ use Drupal\redis\ClientInterface;
  * Recognised keys in $settings['redis.connection'], on top of the stock ones:
  *   - tls: (bool) wrap the connection in TLS, for in-transit encryption.
  *   - timeout: (float) connect timeout in seconds, default 1.0.
- *   - read_timeout: (float) read timeout in seconds, default 1.0. Zero or
+ *   - read_timeout: (float) read timeout in seconds, default 5.0. Zero or
  *     less means no limit, which is the stock behaviour and the one this
  *     class exists to replace; see ::readTimeout().
  *   - retry_interval: (int) milliseconds between connect retries, default 100.
@@ -214,9 +214,23 @@ class PhpRedisRttFactory extends PhpRedisFactory {
    *   The read timeout, or a negative value meaning no limit.
    *
    * @see \Drupal\Tests\redis_rtt\Kernel\PhpRedisRttConnectionTest
+   *
+   * The default is five seconds, not one. One is aggressive for a cache read
+   * over a network hop: a garbage collection pause on the Redis side, or the
+   * few hundred milliseconds a failover takes, exceed it. Measured with a Redis
+   * deaf for four seconds, a one-second limit turned a slow request into a 500
+   * and took twelve of sixty requests in a burst with it, where the stock
+   * backend served all sixty - slowly.
+   *
+   * Five keeps what the bound is for. With Redis unreachable the stock client
+   * blocks its worker for two minutes; this one gives up long before the pool
+   * is exhausted. What it stops doing is turning a hiccup into an error page.
+   *
+   * Sites that would rather fail fast can still say so, and sites that want
+   * stock behaviour can set it to zero.
    */
   protected function readTimeout(#[\SensitiveParameter] array $settings): float {
-    $read_timeout = (float) ($settings['read_timeout'] ?? 1.0);
+    $read_timeout = (float) ($settings['read_timeout'] ?? 5.0);
 
     return $read_timeout > 0 ? $read_timeout : -1.0;
   }

@@ -198,7 +198,7 @@ class SentinelConnectionTest extends UnitTestCase {
     $factory = new RecordingPhpRedisRttFactory();
 
     $this->assertSame(
-      1.0,
+      5.0,
       $factory->readTimeoutFor(['host' => '127.0.0.1', 'port' => 6379]),
     );
   }

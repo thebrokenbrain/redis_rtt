@@ -37,6 +37,7 @@ Submit bug reports and feature suggestions, or track changes in the
 - Recommended modules
 - Installation
 - Configuration
+- Recovery
 - How it works
 - Measured results
 - Troubleshooting
@@ -99,7 +100,8 @@ are active, so a half-finished configuration is visible rather than silent.
 ### Minimum configuration
 
 ```php
-// Adjust the path if the module is not in modules/contrib.
+// Only needed if the module was NOT installed with Composer - see below.
+// Adjust the path if it is not in modules/contrib.
 $class_loader->addPsr4(
   'Drupal\\redis_rtt\\',
   __DIR__ . '/../../modules/contrib/redis_rtt/src',
@@ -111,6 +113,12 @@ $class_loader->addPsr4(
 // "The service ... has a dependency on a non-existent service redis.factory".
 $settings['container_yamls'][] = 'modules/contrib/redis/redis.services.yml';
 
+// Where Redis is. These default to 127.0.0.1 and 6379, which is almost never
+// what a site this module is for actually has: the whole premise here is a
+// Redis that is a network hop away.
+$settings['redis.connection']['host'] = '10.0.2.31';
+$settings['redis.connection']['port'] = 6379;
+
 $settings['redis.connection']['interface'] = 'PhpRedisRtt';
 $settings['redis.connection']['persistent'] = TRUE;
 $settings['cache']['default'] = 'cache.backend.redis_rtt';
@@ -118,9 +126,12 @@ $settings['container_yamls'][] = 'modules/contrib/redis_rtt/redis_rtt.services.y
 $settings['container_yamls'][] = 'modules/contrib/redis_rtt/redis_rtt.services.example.yml';
 ```
 
-The `addPsr4()` call is needed because the classes named below are loaded
-before Drupal registers module namespaces. `$class_loader` is in scope inside
-`settings.php`.
+The `addPsr4()` call is only for installations that did not come through
+Composer. The classes named below are loaded before Drupal registers module
+namespaces, so something has to know where they live; `composer.json` declares
+`autoload.psr-4`, which covers it for a Composer install. If the module was
+unpacked by hand, keep the call - without it every page is a 500 and `drush`
+cannot boot either. `$class_loader` is in scope inside `settings.php`.
 
 `redis.services.yml` has to come first, and it is the line most easily missed.
 Every service this module defines takes `@redis.factory` as an argument, and
@@ -270,6 +281,45 @@ an instance without the module.
 Each stage is reverted by removing or restoring one line. Cache entries have the same format
 as the stock backend's, so nothing persists in an incompatible state.
 
+**Check each stage with an HTTP request, not with `drush`'s exit code.** `drush
+cr` prints `[success] Cache rebuild complete` and exits 0 on a site that is
+serving 500 to every visitor - it rebuilt what it could reach, which is not the
+same as the site being able to boot. One `curl -o /dev/null -w '%{http_code}'`
+against a real route, authenticated and anonymous, is what tells you a stage
+landed.
+
+## Recovery
+
+Every state below is reachable by getting one line wrong, and every one has a
+way out. None of them needs the database.
+
+**The site returns 500 everywhere and `drush` will not boot either.** The
+classes named in `settings.php` cannot be found. Either the module is not where
+the `addPsr4()` call says it is, or it was unpacked by hand and that call is
+missing entirely. Fix the path, or add the call; nothing else is required,
+because nothing has been written anywhere yet.
+
+**Uninstalling the module fails, and afterwards the site still answers 200 but
+`drush cr` does not work.** `settings.php` lists
+`redis_rtt.services.example.yml` without `redis_rtt.services.yml` next to it.
+The overrides in the example file point at services the module defines, so the
+container can no longer be built - the running site is serving from the copy it
+already had, and the next `flushall` or Redis restart turns every page into a
+500. Put both lines back, `drush cr`, and uninstall again.
+
+**The site breaks right after upgrading the module.** The compiled service
+container is cached, and if `$settings['bootstrap_container_definition']` is in
+use it is cached *in Redis* - so the thing that has to be rebuilt is being read
+from the place the broken configuration points at. `drush cr` still recovers
+this; if it cannot, comment out `bootstrap_container_definition`, clear caches,
+and put it back.
+
+**Nothing works and you want out now.** Set
+`$settings['cache']['default'] = 'cache.backend.redis'` and comment out the two
+`redis_rtt` `container_yamls` lines. The stock backend reads the entries this
+module wrote and vice versa - the formats are identical - so there is no
+migration and no cold start.
+
 
 ## How it works
 
@@ -387,6 +437,11 @@ The shape of that table is the argument for dropping batched writes: the warm
 rows, which are the bulk of real traffic, are where this module does most of its
 work, and batching contributed nothing to them.
 
+It is also the bar this module holds itself to: **at least 40% fewer waits on a
+warm authenticated page.** The cold rows are reported because they are true, not
+because they are the case for installing it - a cold page is mostly writing, and
+grouping reads saves waits where there are reads to group.
+
 **"Cold" above means this module's caches are cold, not everything.** The bench
 protocol leaves core's chained-fast front for `cache.config` valid, so the
 measured request does not re-read configuration. That is one legitimate cold
@@ -465,6 +520,15 @@ other.** The saving *is* the cost of the latency and disappears with it. If
 the cache is on localhost, this module is not for you.
 
 ## Troubleshooting
+
+**A queue worker dies with `read error on connection`.** The bounded read
+timeout applies to every command on the connection, including the blocking
+`brpoplpush` that `Drupal\redis\Queue\RedisQueue::claimItem()` uses when
+`$settings['redis.connection']['reserve_timeout']` is set. If the queue waits
+longer than the read timeout, phpredis raises - and the message says nothing
+about which setting caused it. Keep `reserve_timeout` below
+`read_timeout` (5 seconds by default), or leave `reserve_timeout` unset so the
+queue polls instead of blocking.
 
 **The status report says parts are inactive.** The module needs
 `settings.php` configuration to do anything; see Configuration. The status

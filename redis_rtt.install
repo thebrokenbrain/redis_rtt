@@ -178,6 +178,10 @@ function redis_rtt_requirements(string $phase): array {
     ? $factory->getClientName()
     : $interface;
   $connection_notes = [];
+  // Notes that describe a problem drive the severity. Notes that merely state
+  // what is in force do not: reporting a correctly configured timeout as
+  // "suboptimal" trains people to ignore the row.
+  $connection_info = [];
   if (!$persistent) {
     $connection_notes[] = t('Persistent connections are off. Every request pays a fresh TCP (and TLS) handshake, which is several round trips before any work happens.');
   }
@@ -190,6 +194,19 @@ function redis_rtt_requirements(string $phase): array {
   if ($client !== NULL && !str_starts_with($client, 'PhpRedisRtt')) {
     $connection_notes[] = t('The connection is @client rather than PhpRedisRtt, so no read timeout is configured. The PHP default is unlimited, which means a connection dropped by a failover blocks the worker until the FPM request timeout.', ['@client' => $client]);
   }
+  // The read timeout is the module's most consequential connection setting and
+  // the one nobody thinks about until a failover. Report the number, not just
+  // that there is one.
+  $read_timeout = (float) ($connection['read_timeout'] ?? 5.0);
+  if ($client !== NULL && str_starts_with($client, 'PhpRedisRtt')) {
+    if ($read_timeout > 0) {
+      $connection_info[] = t('Reads give up after @seconds s. That bounds a stalled Redis to one failed request instead of a blocked worker - the stock client waits indefinitely, which is two minutes of held worker when Redis is unreachable. The trade is that a Redis slower than this answers with an error page rather than a slow page. Set <code>$settings["redis.connection"]["read_timeout"]</code> to change it, or to 0 for the stock behaviour.', ['@seconds' => $read_timeout]);
+    }
+    else {
+      $connection_info[] = t('Reads have no time limit, which is the stock behaviour: a Redis that stops answering will hold its PHP worker until the request timeout. That is a deliberate setting here - <code>$settings["redis.connection"]["read_timeout"]</code> is 0 or less - but it gives up the one protection this client adds over the stock one.');
+    }
+  }
+
   $requirements['redis_rtt_connection'] = [
     'title' => t('Redis RTT: Redis connection'),
     'value' => match (TRUE) {
@@ -198,9 +215,9 @@ function redis_rtt_requirements(string $phase): array {
       default => t('Configured (@client)', ['@client' => $client]),
     },
     'severity' => $connection_notes ? REQUIREMENT_WARNING : REQUIREMENT_OK,
-    'description' => $connection_notes ? [
+    'description' => ($connection_notes || $connection_info) ? [
       '#theme' => 'item_list',
-      '#items' => $connection_notes,
+      '#items' => array_merge($connection_notes, $connection_info),
     ] : NULL,
   ];
 

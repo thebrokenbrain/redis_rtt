@@ -129,7 +129,7 @@ class PhpRedisRttConnectionTest extends KernelTestBase {
     $client = (new PhpRedisRttFactory())->getClient($this->settings());
 
     $this->assertEqualsWithDelta(
-      1.0,
+      5.0,
       (float) $client->getOption(\Redis::OPT_READ_TIMEOUT),
       0.001,
       'A connection with nothing configured must still be bounded.',
