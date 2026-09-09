@@ -153,16 +153,40 @@ class PhpRedisRttConnectionTest extends KernelTestBase {
    */
   public function testReadTimeoutOfZeroLeavesWorkingConnection(): void {
     $client = (new PhpRedisRttFactory())->getClient($this->settings(['read_timeout' => 0]));
+    $stock = (float) ini_get('default_socket_timeout');
 
     $this->assertSame(
       'v',
       $this->roundTrip($client),
-      'Asking for no limit must not take the site down: this is the read that used to fail.',
+      'Asking for the stock behaviour must not take the site down: this is the read that used to fail.',
     );
-    $this->assertLessThanOrEqual(
-      0,
+    $in_force = (float) $client->getOption(\Redis::OPT_READ_TIMEOUT);
+    $this->assertNotSame(
+      0.0,
+      $in_force,
+      'A literal 0.0 is what breaks the next read, so it must never reach the connection.',
+    );
+    $this->assertSame(
+      $stock > 0 ? $stock : -1.0,
+      $in_force,
+      'Zero asks for what the site would do without this module, which is default_socket_timeout.',
+    );
+  }
+
+  /**
+   * A read timeout that is not a number leaves the default in force.
+   *
+   * @covers ::resolveReadTimeout
+   */
+  public function testNonNumericReadTimeoutFallsBackToTheDefault(): void {
+    $client = (new PhpRedisRttFactory())->getClient($this->settings(['read_timeout' => '0,5']));
+
+    $this->assertSame('v', $this->roundTrip($client), 'The connection still works.');
+    $this->assertEqualsWithDelta(
+      PhpRedisRttFactory::DEFAULT_READ_TIMEOUT,
       (float) $client->getOption(\Redis::OPT_READ_TIMEOUT),
-      'Zero or less means no limit; anything above 0 is a limit nobody asked for.',
+      0.001,
+      'A typo must not remove the bound.',
     );
   }
 

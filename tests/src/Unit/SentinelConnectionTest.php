@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Drupal\Tests\redis_rtt\Unit;
 
 use Drupal\Tests\UnitTestCase;
+use Drupal\redis_rtt\Client\PhpRedisRttFactory;
 
 /**
  * A Sentinel connection has to be configured like any other.
@@ -134,27 +135,104 @@ class SentinelConnectionTest extends UnitTestCase {
   }
 
   /**
-   * A read timeout of zero means no limit, and does not take the site down.
+   * A read timeout of zero asks for the stock behaviour, which is not "none".
    *
-   * Phpredis documents zero as "no limit" and its own default reports back as
-   * 0.0, so an operator who wants the stock unbounded behaviour writes 0. But
-   * passing 0.0 explicitly is not the same code path as leaving it out: on
-   * phpredis 6.3.0 the first read then fails with "socket error on read
-   * socket", so every request raised a RedisException and every page was an
-   * HTTP 500 - against a stock twin, on the same Redis, serving 200. A
-   * non-positive setting is therefore normalised to a negative value, which
-   * reaches the unlimited behaviour without the crash.
+   * An operator writing 0 is asking for what the site would do without this
+   * module. That is not an unbounded read: the stock factory passes no read
+   * timeout and never calls ::setOption(), which leaves phpredis on php.ini's
+   * default_socket_timeout - 60 seconds out of the box. Handing back a negative
+   * value here removed even that, and measured against a Redis deaf for 20
+   * seconds with default_socket_timeout at 3, stock gave up after 6.09 s while
+   * this held its worker for the whole 20.26 s: worse than the thing it was
+   * imitating, from a setting whose documentation promised the opposite.
+   *
+   * What must still never come back is a literal 0.0. Passing that is not the
+   * same code path as leaving the parameter out: on phpredis 6.3.0 the first
+   * read then fails with "socket error on read socket", so every request raised
+   * a RedisException and every page was an HTTP 500, against a stock twin on
+   * the same Redis serving 200.
    *
    * @dataProvider providerNonPositiveReadTimeouts
    */
-  public function testNonPositiveReadTimeoutMeansNoLimit(mixed $configured): void {
+  public function testNonPositiveReadTimeoutMeansStockBehaviour(mixed $configured): void {
+    $factory = new RecordingPhpRedisRttFactory();
+    $stock = (float) ini_get('default_socket_timeout');
+    $expected = $stock > 0 ? $stock : -1.0;
+
+    $resolved = $factory->readTimeoutFor(['host' => '127.0.0.1', 'port' => 6379, 'read_timeout' => $configured]);
+
+    $this->assertSame(
+      $expected,
+      $resolved,
+      'Zero or less must mean what the site would do without this module.',
+    );
+    $this->assertNotSame(
+      0.0,
+      $resolved,
+      'And never a literal 0.0, which is the value that breaks the next read.',
+    );
+  }
+
+  /**
+   * When php.ini itself says "unlimited", that is what gets passed on.
+   *
+   * A default_socket_timeout of 0 or less is the one case that genuinely means
+   * no limit, and -1.0 is how phpredis is told so: 0.0 breaks the next read.
+   */
+  public function testStockOfZeroBecomesTheNegativeValue(): void {
+    $factory = new RecordingPhpRedisRttFactory();
+    $original = ini_get('default_socket_timeout');
+
+    try {
+      foreach (['0', '-1'] as $unlimited) {
+        ini_set('default_socket_timeout', $unlimited);
+        $this->assertSame(
+          -1.0,
+          $factory->readTimeoutFor(['host' => '127.0.0.1', 'port' => 6379, 'read_timeout' => 0]),
+          "With default_socket_timeout at $unlimited there is no bound to pass on, and 0.0 is not how that is said.",
+        );
+      }
+    }
+    finally {
+      ini_set('default_socket_timeout', (string) $original);
+    }
+  }
+
+  /**
+   * A read timeout that is not a number is refused, and the default stands.
+   *
+   * A decimal comma, an empty string, and a getenv() for a variable that is not
+   * set all used to pass through a plain (float) cast as 0.0 - which meant "no
+   * limit" - so a typo silently removed the one protection this client adds
+   * over the stock one, and the status report called it deliberate.
+   *
+   * @dataProvider providerNonNumericReadTimeouts
+   */
+  public function testNonNumericReadTimeoutIsRefused(mixed $configured): void {
     $factory = new RecordingPhpRedisRttFactory();
 
-    $this->assertLessThan(
-      0,
+    $this->assertSame(
+      PhpRedisRttFactory::DEFAULT_READ_TIMEOUT,
       $factory->readTimeoutFor(['host' => '127.0.0.1', 'port' => 6379, 'read_timeout' => $configured]),
-      'A non-positive read timeout must become the negative value phpredis treats as unlimited.',
+      'A value that is not a number must not decide anything.',
     );
+  }
+
+  /**
+   * Values that are not numbers at all.
+   *
+   * @return array<string, array{mixed}>
+   *   Each case, keyed by how it gets written by accident.
+   */
+  public static function providerNonNumericReadTimeouts(): array {
+    return [
+      'decimal comma' => ['0,5'],
+      'empty string' => [''],
+      'unset getenv' => [FALSE],
+      'a word' => ['abc'],
+      'an array' => [[]],
+      'true' => [TRUE],
+    ];
   }
 
   /**

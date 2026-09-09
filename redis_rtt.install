@@ -10,6 +10,7 @@ declare(strict_types=1);
 use Drupal\Core\Cache\Cache;
 use Drupal\Core\Site\Settings;
 use Drupal\redis\ClientFactory as RedisClientFactory;
+use Drupal\redis_rtt\Client\PhpRedisRttFactory;
 
 /**
  * Implements hook_requirements().
@@ -196,14 +197,29 @@ function redis_rtt_requirements(string $phase): array {
   }
   // The read timeout is the module's most consequential connection setting and
   // the one nobody thinks about until a failover. Report the number, not just
-  // that there is one.
-  $read_timeout = (float) ($connection['read_timeout'] ?? 5.0);
+  // that there is one - and read it from the same place the connection does,
+  // so this cannot describe a timeout that is not in force.
   if ($client !== NULL && str_starts_with($client, 'PhpRedisRtt')) {
-    if ($read_timeout > 0) {
-      $connection_info[] = t('Reads give up after @seconds s. That bounds a stalled Redis to one failed request instead of a blocked worker - the stock client waits indefinitely, which is two minutes of held worker when Redis is unreachable. The trade is that a Redis slower than this answers with an error page rather than a slow page. Set <code>$settings["redis.connection"]["read_timeout"]</code> to change it, or to 0 for the stock behaviour.', ['@seconds' => $read_timeout]);
-    }
-    else {
-      $connection_info[] = t('Reads have no time limit, which is the stock behaviour: a Redis that stops answering will hold its PHP worker until the request timeout. That is a deliberate setting here - <code>$settings["redis.connection"]["read_timeout"]</code> is 0 or less - but it gives up the one protection this client adds over the stock one.');
+    $resolved = PhpRedisRttFactory::resolveReadTimeout($connection);
+    switch ($resolved['state']) {
+      case 'invalid':
+        // A note, not an info: this one describes a problem, so it drives the
+        // severity. A mistyped value used to pass through a (float) cast as 0,
+        // which meant "no limit", and the row said it was deliberate.
+        $connection_notes[] = t('<code>$settings["redis.connection"]["read_timeout"]</code> is set to <code>@raw</code>, which is not a number. It has been refused and the default of @seconds s is in force. A decimal comma, an empty string, and a <code>getenv()</code> for a variable that is not set all land here.', [
+          '@raw' => is_scalar($resolved['raw']) ? var_export($resolved['raw'], TRUE) : gettype($resolved['raw']),
+          '@seconds' => $resolved['timeout'],
+        ]);
+        break;
+
+      case 'stock':
+        $connection_info[] = $resolved['timeout'] > 0
+          ? t('Reads give up after @seconds s, which is the stock behaviour: <code>$settings["redis.connection"]["read_timeout"]</code> is 0 or less, so php.ini\'s <code>default_socket_timeout</code> applies, exactly as it would without this module. Set a positive number to bound reads more tightly than that.', ['@seconds' => $resolved['timeout']])
+          : t('Reads have no time limit at all: <code>$settings["redis.connection"]["read_timeout"]</code> is 0 or less and php.ini\'s <code>default_socket_timeout</code> is unlimited too, so a Redis that stops answering will hold its PHP worker until the request timeout. Set a positive number to bound them.');
+        break;
+
+      default:
+        $connection_info[] = t('Reads give up after @seconds s. That bounds a stalled Redis to one failed request instead of a blocked worker; without it a connection dropped by a failover holds the worker for php.ini\'s <code>default_socket_timeout</code>, 60 s out of the box. The trade is that a Redis slower than this answers with an error page rather than a slow page. Set <code>$settings["redis.connection"]["read_timeout"]</code> to change it, or to 0 for the stock behaviour.', ['@seconds' => $resolved['timeout']]);
     }
   }
 

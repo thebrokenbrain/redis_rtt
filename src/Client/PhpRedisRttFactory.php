@@ -32,9 +32,11 @@ use Drupal\redis\ClientInterface;
  * Recognised keys in $settings['redis.connection'], on top of the stock ones:
  *   - tls: (bool) wrap the connection in TLS, for in-transit encryption.
  *   - timeout: (float) connect timeout in seconds, default 1.0.
- *   - read_timeout: (float) read timeout in seconds, default 5.0. Zero or
- *     less means no limit, which is the stock behaviour and the one this
- *     class exists to replace; see ::readTimeout().
+ *   - read_timeout: (float) read timeout in seconds, default 5.0. Zero or less
+ *     asks for the stock behaviour, which is php.ini's default_socket_timeout
+ *     rather than no limit at all. A value that is not a number is refused and
+ *     the default stands; the status report says so. See
+ *     ::resolveReadTimeout().
  *   - retry_interval: (int) milliseconds between connect retries, default 100.
  *   - persistent_id: (string) connection pool identifier.
  *   - user: (string) ACL username, for Redis 6 style authentication.
@@ -51,6 +53,13 @@ use Drupal\redis\ClientInterface;
  * master's.
  */
 class PhpRedisRttFactory extends PhpRedisFactory {
+
+  /**
+   * Seconds a read waits when nothing is configured.
+   *
+   * @see ::resolveReadTimeout()
+   */
+  public const DEFAULT_READ_TIMEOUT = 5.0;
 
   /**
    * {@inheritdoc}
@@ -190,23 +199,6 @@ class PhpRedisRttFactory extends PhpRedisFactory {
   /**
    * Returns the read timeout to hand phpredis, in seconds.
    *
-   * A non-positive setting means "no limit", which is what phpredis documents
-   * and what an operator writing 0 is asking for. It cannot be passed on as
-   * written: measured on phpredis 6.3.0, ::connect() accepts 0.0 perfectly
-   * well, but ::setOption(OPT_READ_TIMEOUT, 0.0) makes the next read fail with
-   * "socket error on read socket". This class calls both, so a site that set 0
-   * got an HTTP 500 on every page where the stock factory - which calls
-   * neither - served it normally. A negative value is accepted by both and
-   * reaches the unlimited behaviour reliably.
-   *
-   * Which of the two rejects it is worth knowing, because the fix suggested by
-   * blaming ::connect() is to stop passing the parameter, and that leaves the
-   * ::setOption() call and still takes the site down.
-   *
-   * Honouring the setting rather than refusing it is deliberate: an unbounded
-   * read is the failure mode this class exists to avoid, but it is an explicit
-   * request from an operator who wanted the stock behaviour back.
-   *
    * @param array<string, mixed> $settings
    *   The connection settings.
    *
@@ -214,25 +206,85 @@ class PhpRedisRttFactory extends PhpRedisFactory {
    *   The read timeout, or a negative value meaning no limit.
    *
    * @see \Drupal\Tests\redis_rtt\Kernel\PhpRedisRttConnectionTest
+   */
+  protected function readTimeout(#[\SensitiveParameter] array $settings): float {
+    return static::resolveReadTimeout($settings)['timeout'];
+  }
+
+  /**
+   * Works out the read timeout and how it was arrived at.
+   *
+   * Shared with redis_rtt_requirements(), which has to report the same number
+   * this class is about to use. It used to repeat the default and the
+   * conversion on its own, so the two could drift and the status report could
+   * describe a connection that did not exist.
    *
    * The default is five seconds, not one. One is aggressive for a cache read
    * over a network hop: a garbage collection pause on the Redis side, or the
    * few hundred milliseconds a failover takes, exceed it. Measured with a Redis
    * deaf for four seconds, a one-second limit turned a slow request into a 500
    * and took twelve of sixty requests in a burst with it, where the stock
-   * backend served all sixty - slowly.
+   * backend served all sixty - slowly. At five, none of the sixty failed.
    *
-   * Five keeps what the bound is for. With Redis unreachable the stock client
-   * blocks its worker for two minutes; this one gives up long before the pool
-   * is exhausted. What it stops doing is turning a hiccup into an error page.
+   * Three things this has to get right, and each of them was got wrong before:
    *
-   * Sites that would rather fail fast can still say so, and sites that want
-   * stock behaviour can set it to zero.
+   * A **non-numeric** setting is not a request for anything. `'0,5'` written
+   * with a decimal comma, an empty string, or a getenv() that returned FALSE
+   * because the variable is not set, all became 0.0 through a plain (float)
+   * cast, and 0.0 meant "no limit" - so a typo silently removed the one
+   * protection this class adds, and the status report called it deliberate.
+   * The value is now refused, the default stands, and ::$state says so, so the
+   * status report can show it as a problem.
+   *
+   * **Zero means the stock behaviour**, and stock is not "unlimited". The
+   * stock factory calls ::pconnect() without a read timeout and never calls
+   * ::setOption(), which leaves phpredis on php.ini's default_socket_timeout -
+   * 60 seconds out of the box, not forever. Passing -1.0 here removed even
+   * that: measured against a Redis deaf for 20 seconds with
+   * default_socket_timeout at 3, stock gave up after 6.09 s and this held the
+   * worker for the whole 20.26 s. Worse than the thing it was imitating.
+   *
+   * And it cannot be passed on as **0.0** literally: measured on phpredis
+   * 6.3.0, ::connect() accepts 0.0 but ::setOption(OPT_READ_TIMEOUT, 0.0)
+   * makes the next read fail with "socket error on read socket". This class
+   * calls both. A default_socket_timeout of 0 or less is the one case that
+   * genuinely means unlimited, and -1.0 is how phpredis is told that.
+   *
+   * @param array<string, mixed> $settings
+   *   The connection settings.
+   *
+   * @return array{timeout: float, state: string, raw: mixed}
+   *   The seconds to use; how it was decided - 'default', 'bounded', 'stock'
+   *   or 'invalid'; and what was configured, for reporting an invalid one.
    */
-  protected function readTimeout(#[\SensitiveParameter] array $settings): float {
-    $read_timeout = (float) ($settings['read_timeout'] ?? 5.0);
+  public static function resolveReadTimeout(#[\SensitiveParameter] array $settings): array {
+    $raw = $settings['read_timeout'] ?? NULL;
 
-    return $read_timeout > 0 ? $read_timeout : -1.0;
+    if ($raw === NULL) {
+      return ['timeout' => static::DEFAULT_READ_TIMEOUT, 'state' => 'default', 'raw' => NULL];
+    }
+    if (!is_numeric($raw)) {
+      return ['timeout' => static::DEFAULT_READ_TIMEOUT, 'state' => 'invalid', 'raw' => $raw];
+    }
+
+    $seconds = (float) $raw;
+    if ($seconds > 0) {
+      return ['timeout' => $seconds, 'state' => 'bounded', 'raw' => $raw];
+    }
+
+    return ['timeout' => static::stockReadTimeout(), 'state' => 'stock', 'raw' => $raw];
+  }
+
+  /**
+   * What phpredis would wait for if this class configured nothing.
+   *
+   * @return float
+   *   php.ini's default_socket_timeout, or -1.0 when that itself is unlimited.
+   */
+  protected static function stockReadTimeout(): float {
+    $seconds = (float) ini_get('default_socket_timeout');
+
+    return $seconds > 0 ? $seconds : -1.0;
   }
 
   /**
