@@ -205,6 +205,7 @@ $settings['bootstrap_container_definition'] = [
 | `redis_rtt_redirect_shortcut` | `TRUE` | Skip the render cache redirect hop on a hit. |
 | `redis_rtt_redirect_shortcut_ttl` | `86400` | Lifetime of a learned mapping, in seconds. |
 | `redis_rtt_chain_memo_limit` | `1000` | Maximum render cache chains memoised in one request. |
+| `redis_rtt_shortcut_memo_limit` | `1000` | Maximum learned mappings held in one process. Matters most with APCu off, where that memo is the whole store. |
 | `redis_rtt_tag_warmset_limit` | `400` | Maximum cache tags preloaded in one `MGET`. |
 | `redis_rtt_tag_warmset_min_hits` | `3` | Requests a tag must appear in before it is preloaded. |
 | `redis_rtt_tag_warmset_ttl` | `1.0` | Seconds a preloaded checksum may answer for its tag. Inside that window this module can serve an entry another process just invalidated; `0` removes the window. See Troubleshooting. |
@@ -222,33 +223,41 @@ this.
 
 A pipeline that fails partway is a different matter, because phpredis is then
 holding a socket with replies still queued on it and the next command would read
-the previous one's reply - on a persistent connection, in the next request. The
-two places this module opens a pipeline of scripts, `invalidateMultiple()` and
-`LuaRedisLock::releaseAll()`, close the connection on failure for that reason;
-phpredis reconnects on the next command.
+the previous one's reply - on a persistent connection, in the next request. All
+three places this module opens a pipeline - `getMultiple()`,
+`invalidateMultiple()` and `LuaRedisLock::releaseAll()` - close the connection
+on failure for that reason; phpredis reconnects on the next command.
 
 The connection accepts these on top of the redis module's own: `tls`, `timeout`,
 `read_timeout`, `retry_interval`, `persistent_id`, `user`, `verify_peer`.
 
-`read_timeout` defaults to 1 second where stock phpredis waits forever, which is
-the point: an unbounded read turns a failover into an outage. It is worth being
-concrete about what that trade buys and costs, because it is the one setting
-here that changes what a visitor sees.
+`read_timeout` defaults to 5 seconds where stock phpredis waits forever, which
+is the point: an unbounded read turns a failover into an outage. It is worth
+being concrete about what that trade buys and costs, because it is the one
+setting here that changes what a visitor sees.
 
-Measured with Redis alive but not answering for four seconds, six PHP-FPM
-workers, ~400 requests: stock served every one of them, taking up to 4.2 s.
-This module returned a 500 for three to seven of them and never waited longer
-than 3.2 s. Neither side served wrong content, and both recovered fully. Raising
-`read_timeout` to 30 makes this module behave exactly like stock in that test.
+A stall shorter than the timeout costs nothing either way. A stall longer than
+it fails requests fast here and holds a worker there, and which of those is
+better depends on whether you would rather shed a request or queue behind a
+stalled Redis until PHP gives up. With Redis unreachable rather than slow, stock
+holds its worker for two minutes.
 
-So: a stall shorter than the timeout costs nothing either way, a stall longer
-than it fails a few requests fast here and holds a worker there. Which is better
-depends on whether you would rather shed a request or queue behind a stalled
-Redis until PHP gives up. It is a limit on *every* reply, including ones you are
-deliberately waiting for.
+The default was 1 second until 2026-09-09. Measured at that value, with Redis
+alive but not answering for four seconds and six PHP-FPM workers, stock served
+every request taking up to 4.2 s while this module failed a portion of them
+within about 2 s; neither served wrong content and both recovered fully. A
+second turned out to be aggressive for a cache read across a network hop - a
+garbage collection pause or a failover fits inside it - so the default is now
+five, which does not trip on a stall of that length at all. The behaviour at
+five seconds has not been measured under load; what is measured is the
+behaviour at one, and it is why the number changed.
+
+It is a limit on *every* reply, including ones you are deliberately waiting
+for.
 `RedisQueue::claimItem()` blocks on `brpoplpush` and does not catch the
-exception, so a site using the redis module's queue backend must raise
-`read_timeout` above that queue's own blocking timeout. That timeout is
+exception, so a site using the redis module's queue backend must keep that
+queue's own blocking timeout below `read_timeout` (5 seconds by default), or
+raise `read_timeout` above it. That timeout is
 `$settings['redis_queue_<name>']['reserve_timeout']`, set per queue and `NULL`
 by default - and with `NULL` the queue uses a non-blocking `rpoplpush`, so a
 site that has never set it is not exposed at all. Do not read the `30` in
