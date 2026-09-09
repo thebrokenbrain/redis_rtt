@@ -10,13 +10,13 @@ many of them Drupal makes. Across an availability zone it costs about 1 ms, and
 an authenticated page request makes hundreds of them, strictly one after
 another: each answer decides what to ask next.
 
-This module makes the same work wait for the network far less often. Reads that
-Drupal issues one at a time are gathered into single pipelines; the writes of
-What that changes is the waiting, not the work. Reads that were sequential are
-pipelined, compare-and-act protocols are moved into Lua, and a chain that had to
-be walked one hop at a time is fetched in one go once its shape is known. The
-clearest scenario is a warm content listing: 166 waits become 85, and 359 ms
-become 230. On a heavy authenticated page built from cold, 817 become 690.
+This module makes the same work wait for the network far less often. What
+changes is the waiting, not the work: reads Drupal issues one at a time are
+gathered into single pipelines, compare-and-act protocols are moved into Lua,
+and a chain that had to be walked one hop at a time is fetched in one go once
+its shape is known. The clearest scenario is a warm content listing: 166 waits
+become 85, and 359 ms become 230. On a heavy authenticated page built from
+cold, 817 become 690.
 
 Writes are not deferred. They go to Redis at the point the stock backend sends
 them, which is a deliberate reversal: an earlier version of this module held
