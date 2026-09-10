@@ -135,21 +135,26 @@ class SentinelConnectionTest extends UnitTestCase {
   }
 
   /**
-   * A read timeout of zero leaves the connection unconfigured, like stock.
+   * A read timeout of zero asks ::pconnect() for what stock asks it for.
    *
    * An operator writing 0 is asking for what the site would do without this
-   * module, and the only way to mean that exactly is to do what the stock
-   * factory does: hand ::pconnect() the 0.0 that omitting the parameter gives,
-   * and never call ::setOption(). phpredis then reads php.ini's
-   * default_socket_timeout at connect time.
+   * module, which is php.ini's default_socket_timeout. Getting there takes two
+   * different numbers and this test pins the first: what goes to ::pconnect()
+   * is the 0.0 that omitting the parameter gives, exactly as the stock factory
+   * sends it. What is then imposed on the connection is php.ini's own value,
+   * and only a real socket can show that - see
+   * \Drupal\Tests\redis_rtt\Kernel\PhpRedisRttConnectionTest.
    *
-   * Two earlier attempts translated it instead, and each was wrong somewhere.
-   * -1.0 removed even php.ini's bound: with default_socket_timeout at 3 and a
-   * Redis deaf for 20 seconds, stock gave up after 6.09 s and this held its
-   * worker the whole 20.26 s. Copying php.ini's number in fixed that and broke
-   * default_socket_timeout = 0, which is not "unlimited" but a select() that
-   * expires at once: there stock served every request in under 120 ms while
-   * this held all six pool workers for 40 s.
+   * Three earlier attempts got it wrong, each somewhere different. -1.0 removed
+   * even php.ini's bound: with default_socket_timeout at 3 and a Redis deaf for
+   * 20 seconds, stock gave up after 6.09 s and this held its worker the whole
+   * 20.26 s. Copying php.ini's number into ::resolveReadTimeout() fixed that
+   * and broke default_socket_timeout = 0, which is not "unlimited" but a
+   * select() that expires at once: there stock served every request in under
+   * 120 ms while this held all six pool workers for 40 s. And leaving
+   * ::setOption() uncalled - which looked like the exact imitation of stock -
+   * held on a fresh socket and not on a pooled one, where the bound of whatever
+   * connection came before survived.
    *
    * @dataProvider providerNonPositiveReadTimeouts
    */
@@ -169,13 +174,16 @@ class SentinelConnectionTest extends UnitTestCase {
   }
 
   /**
-   * Nothing is configured on the connection in the stock state.
+   * Every non-positive value reaches the stock state, and no positive one does.
    *
-   * The value alone does not say it: 0.0 has to reach ::pconnect() *and*
-   * ::setOption() has to be skipped, because setOption(OPT_READ_TIMEOUT, 0.0)
-   * makes the next read fail with "socket error on read socket".
+   * The state is what decides which number ::connect() imposes on the
+   * connection, so getting a value into the wrong one is how an operator ends
+   * up with a bound nobody asked for. This test pins the classification only;
+   * what the state then does to a socket is asserted in
+   * \Drupal\Tests\redis_rtt\Kernel\PhpRedisRttConnectionTest, against a real
+   * one, because nothing here can tell.
    */
-  public function testTheStockStateSkipsSetOption(): void {
+  public function testEveryNonPositiveValueReachesTheStockState(): void {
     $method = (new \ReflectionClass(PhpRedisRttFactory::class))->getMethod('resolveReadTimeout');
     $method->setAccessible(TRUE);
 
@@ -183,7 +191,7 @@ class SentinelConnectionTest extends UnitTestCase {
       $this->assertSame(
         'stock',
         $method->invoke(NULL, ['read_timeout' => $configured])['state'],
-        'Every non-positive value has to reach the state that skips it.',
+        'Every non-positive value has to reach the stock state.',
       );
     }
     foreach ([2.5, '1'] as $configured) {
