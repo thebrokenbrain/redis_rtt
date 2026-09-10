@@ -16,12 +16,12 @@ use Drupal\redis\ClientInterface;
  *
  * The *contents* are Relay's version of it, not phpredis's, and the difference
  * matters enough to say here. On Relay the shift is clean, so the last slot
- * holds an HGETALL's array and is_scalar() refuses it - which is what this
- * double exercises. On phpredis the parser desynchronises as well and the last
- * slot comes back as a raw protocol fragment such as "*14", a scalar that
- * nothing here rejects; that shape is not covered by any test, because the
- * outcome it produces is the one the stock backend produces too. See the note
- * in \Drupal\redis_rtt\Cache\PipeliningRedisBackend::getMultiple().
+ * holds an HGETALL's array. On phpredis the parser desynchronises as well and
+ * the last slot comes back as a raw protocol fragment such as "*14", which is
+ * scalar and used to be adopted as a timestamp;
+ * \Drupal\Tests\redis_rtt\Unit\DesyncedReplyClient is that one, and it has
+ * its own test. See the note in
+ * \Drupal\redis_rtt\Cache\PipeliningRedisBackend::getMultiple().
  *
  * A count check cannot see either shape.
  */

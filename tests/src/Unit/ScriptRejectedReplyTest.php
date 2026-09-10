@@ -391,4 +391,82 @@ class ScriptRejectedReplyTest extends UnitTestCase {
     $this->assertFalse($backend->get('uno'), 'And the entry was invalidated anyway.');
   }
 
+  /**
+   * The shape phpredis really produces yields no marker either.
+   *
+   * A shifted reply set on phpredis does not put an array where the timestamp
+   * belongs, the way Relay's does: its parser desynchronises too and the last
+   * slot is a raw protocol fragment, a scalar. Measured through a TCP proxy
+   * against phpredis 6.3.0 with four kinds of leftover; all four behaved the
+   * same. is_scalar() let that through and the marker became 0.0 - 1970 - so a
+   * flush that really happened stopped being honoured and the entries it had
+   * retired were served again.
+   *
+   * @covers \Drupal\redis_rtt\Cache\PipeliningRedisBackend::getMultiple
+   */
+  public function testProtocolFragmentIsNotTakenAsMarker(): void {
+    $client = new DesyncedReplyClient(new FakeRedisClient());
+    $checksum = $this->createMock(CacheTagsChecksumInterface::class);
+    $checksum->method('isValid')->willReturn(TRUE);
+    $construir = static function () use ($client, $checksum): PipeliningRedisBackend {
+      $b = new PipeliningRedisBackend('render', $client, $checksum, new PhpSerialize());
+      $b->setPrefix('p');
+      return $b;
+    };
+
+    $construir()->set('uno', 'V1');
+    $construir()->set('dos', 'V2');
+    $construir()->deleteAll();
+
+    $reader = $construir();
+    $client->desynced = TRUE;
+    $cids = ['uno', 'dos'];
+    $reader->getMultiple($cids);
+
+    $this->assertFalse(
+      $reader->get('uno'),
+      'A flush that really happened must stay honoured: a protocol fragment is not a timestamp.'
+    );
+    $this->assertFalse($reader->get('dos'), 'And for every entry it retired.');
+  }
+
+  /**
+   * An absent marker is still an answer, and still means "never flushed".
+   *
+   * The control for the test above, and the reason the check names FALSE
+   * instead of demanding a number: a bin nobody has ever flushed answers the
+   * marker GET with FALSE on every read. Refusing that would send the inherited
+   * lazy GET on each one, which is a round trip per request for nothing.
+   *
+   * @covers \Drupal\redis_rtt\Cache\PipeliningRedisBackend::getMultiple
+   */
+  public function testTheAbsentMarkerIsStillAdopted(): void {
+    $inner = new FakeRedisClient();
+    $client = new DesyncedReplyClient($inner);
+    $checksum = $this->createMock(CacheTagsChecksumInterface::class);
+    $checksum->method('isValid')->willReturn(TRUE);
+    $construir = static function () use ($client, $checksum): PipeliningRedisBackend {
+      $b = new PipeliningRedisBackend('render', $client, $checksum, new PhpSerialize());
+      $b->setPrefix('p');
+      return $b;
+    };
+
+    $construir()->set('uno', 'V1');
+
+    $reader = $construir();
+    $inner->resetCounters();
+    $cids = ['uno'];
+    $this->assertNotSame([], $reader->getMultiple($cids), 'Never flushed, so the entry is served.');
+
+    // Counted, not read off the property: the property ends at 0.0 either way,
+    // because the inherited lazy GET reaches the same answer by spending a
+    // round trip on it. What the check has to buy is that round trip not
+    // happening, and only the count can see that.
+    $this->assertSame(
+      1,
+      $inner->roundTrips,
+      'The absent marker rode in the read pipeline: refusing it would cost a second round trip per read.'
+    );
+  }
+
 }

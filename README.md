@@ -601,6 +601,19 @@ bootstrap.** The `$class_loader->addPsr4()` call is missing from
 module's own `ClientFactory`, which does not know about this module's client.
 Point it at `Drupal\redis_rtt\ClientFactory`; see Configuration.
 
+**Another site on the same server started timing out on Redis reads.** phpredis
+pools persistent connections by host and port, and the `persistent_id` does not
+separate them: two sites in one PHP-FPM pool talking to the same Redis share
+sockets. This module sets a read timeout on the connection and the stock redis
+module does not, so a socket this module used carries its bound to whoever picks
+it up next - including a site running plain `redis`, which then gives up on a
+slow read where before it waited. Measured on phpredis 6.3.0: a connection with
+`read_timeout` 0.25 followed, on the same `CLIENT ID`, by one the stock factory
+opened, and the read died at 0.25 s. It is not specific to this module - any
+caller that sets the option does it - but this module is the one that sets it by
+default. Give the sites separate Redis ports, or set the same `read_timeout` on
+both.
+
 **Nothing seems faster.** Check `X-Redis-RTT` with `redis_rtt_report` enabled.
 If round trips dropped but wall time did not, the network is not your
 bottleneck and this module has nothing to offer you.

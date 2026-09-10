@@ -139,20 +139,35 @@ LUA;
     // So the marker is read as (float) "*14" = 0.0, which is the 1970 this
     // whole comment is about, and neither the count nor is_scalar() stops it.
     //
-    // No code here is what protects against that, and none is proposed:
-    // \Drupal\redis\Cache\RedisBackend reaches the identical outcome on the
-    // same socket by another route - its getLastDeleteAll() casts whatever its
-    // own GET returns - so a site running the stock backend is no better off.
-    // The checks below stay because they are free and because they do catch the
-    // shapes they name: a FALSE from ::exec(), and a marker that never came
-    // back at all, which is what a short set would leave behind.
+    // What refuses that shape is the is_numeric() below, put there for it.
+    // A marker Redis wrote is a timestamp with a decimal point, so it is always
+    // numeric; a protocol fragment never is, and neither is an HGETALL's array.
+    // The one non-numeric answer that is legitimate is the absent marker, FALSE
+    // or NULL, which is the ordinary state of a bin nobody has ever flushed -
+    // it is let through by name, because refusing it would send the inherited
+    // lazy GET on every read of every such bin, which is a round trip per
+    // request to defend against nothing.
+    //
+    // This is stricter than \Drupal\redis\Cache\RedisBackend, whose
+    // getLastDeleteAll() casts whatever its own GET returns and reaches the
+    // 1970 by another route on the same socket. Being stricter than the twin is
+    // not something this module goes looking for; here it costs one comparison.
+    //
+    // The count check stays because it is free and because it does catch the
+    // shape it names, a marker that never came back at all.
     $replies = is_array($replies) ? $replies : [];
     $intact = count($replies) === $expected;
 
+    // Held apart from the value, because NULL is a legitimate answer from a
+    // client that reports a missing key that way and is also what "the reply
+    // set was not whole, so there is nothing to read" looks like. Conflating
+    // the two adopted 0.0 - 1970 - out of a set that had already been refused.
+    $have_marker = FALSE;
     $marker = NULL;
     if ($needs_last_delete && $intact) {
       // The marker is the last reply in the pipeline.
       $marker = array_pop($replies);
+      $have_marker = TRUE;
     }
 
     foreach ($replies as $values) {
@@ -169,7 +184,12 @@ LUA;
     // afterwards. Taking the marker there anyway made this module blind to that
     // flush for the rest of the request, which is a difference from stock that
     // buys nothing: with no rows there was no round trip to save.
-    if ($needs_last_delete && $rows !== [] && is_scalar($marker)) {
+    // A marker Redis wrote is numeric. An absent one - FALSE, or NULL from a
+    // client that answers that way - is the honest "never flushed". Anything
+    // else came from somewhere this pipeline did not ask.
+    $usable = $have_marker
+      && ($marker === FALSE || $marker === NULL || is_numeric($marker));
+    if ($needs_last_delete && $rows !== [] && $usable) {
       $this->lastDeleteAll = (float) $marker;
     }
 
