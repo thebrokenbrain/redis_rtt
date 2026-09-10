@@ -253,12 +253,15 @@ function redis_rtt_requirements(string $phase): array {
 
   // --- The connection -----------------------------------------------------
   // Reported from the connection that exists, not from the setting that asks
-  // for one: the two are different questions. With no 'interface' named,
-  // \Drupal\redis\ClientFactory takes the highest-priority tagged factory,
-  // which is this module's whenever the module is installed, so reading the
-  // setting alone called a correctly configured site misconfigured. The client
-  // knows which one it is - that is what \Drupal\redis_rtt\Client\PhpRedisRtt
-  // exists for - so ask it.
+  // for one: the two are different questions, and the setting is the weaker of
+  // the two. It is absent on any site that lets service priority choose - with
+  // no 'interface' named, \Drupal\redis\ClientFactory takes the
+  // highest-priority tagged factory, which is the redis module's own 20 against
+  // this module's deliberate 10 - and where it is present it names a factory
+  // rather than what came out of it: instrumentation wraps the client and
+  // changes its name without changing what it is. The client knows which one it
+  // is, which is what \Drupal\redis_rtt\Client\PhpRedisRtt::getName() exists
+  // for, so ask it.
   $connection = Settings::get('redis.connection', []);
   $persistent = !empty($connection['persistent']);
   $interface = $connection['interface'] ?? NULL;

@@ -190,7 +190,12 @@ request returns a 500 that neither the UI nor drush can undo - only editing
 `settings.php` recovers the site.
 
 This is the redis module's own block with one class swapped, and it belongs
-*after* the `$settings['redis.connection']` lines above:
+*after* the `$settings['redis.connection']` lines above. It is reproduced as
+that module ships it, including the `cache.container` entry naming
+`Drupal\redis\Cache\PhpRedis`, a class 2.0.0-alpha2 does not contain: the
+entry also carries a `factory`, which is what actually builds the service, so
+the name is never resolved and the block works. Do not go looking for that
+class.
 
 ```php
 $settings['bootstrap_container_definition'] = [
@@ -409,9 +414,11 @@ Six independent changes, all aimed at the same thing:
 - **One round trip per invalidation.** `invalidateMultiple()` costs a
   sequential `HGET` plus `HSET` per cache ID upstream.
 - **Connection hygiene.** Connect timeout, read timeout, retry interval, TCP
-  keepalive and TLS. The PHP default read timeout is *unlimited*, so a
-  connection dropped by a failover blocks the worker until the FPM request
-  timeout - which is how a brief failover becomes an outage.
+  keepalive and TLS. With no read timeout configured, a read waits for php.ini's
+  `default_socket_timeout` - 60 seconds out of the box, and forever only where
+  php.ini itself says 0 or less. Either way a connection dropped by a failover
+  holds its worker far longer than a cache read is worth, which is how a brief
+  failover becomes an outage.
 
 Nothing is cached across requests except facts that are structural and
 self-verifying, and every write, delete and invalidation reaches Redis exactly
@@ -475,6 +482,14 @@ un-pipelined command and one per `exec()`.
 Because that counter is not free, round trips and wall time were measured in
 separate runs - never the same one. Each figure is the median of three runs.
 
+Not every row here has been reproduced to the same standard, and it is worth
+saying which. The warm round-trip rows have been re-measured independently, on
+other benches, by readers who did not take the figures on trust, and they come
+back the same. The cold rows and the whole wall-time table have not been
+re-measured that way - not refuted either, simply not repeated, because wall
+time needs a machine with nothing else running on it. Treat the warm rows as
+the load-bearing ones; they are also the ones that describe most real traffic.
+
 On the cold scenarios the runs returned the same count every time. The warm ones
 vary by a trip or two - a warm node view came back as 13 and 15 - because what a
 warm page reads depends on what the previous request left in APCu. Those rows
@@ -529,11 +544,18 @@ The `redis-cmds` field counts *calls this module makes to the client*, which is
 what its docblock says it counts. It is not what Redis executes: an `EVAL`
 counts as one call however much its script does.
 
-Measured at the server with `CONFIG RESETSTAT` + `INFO commandstats`, on the
-cold node view, the two configurations are now within a third of a percent of
-each other - 11,221 commands for stock against 11,258 for this module. The
-module asks Redis for essentially the same work; what changed is how many times
-PHP stops to wait for it.
+Measured at the server with `CONFIG RESETSTAT` + `INFO commandstats`, medians
+of three runs on one bench in one sitting:
+
+| scenario, authenticated | stock | module |
+|---|---|---|
+| view a node, cold | 10,505 | 10,516 (+0.1%) |
+| content listing, warm | 231 | 211 (-8.7%) |
+
+The module asks Redis for essentially the same work; what changed is how many
+times PHP stops to wait for it. Read those as ratios and not as absolutes: the
+totals depend on how much content the bench holds, and a differently sized site
+will produce different ones.
 
 That was not true of the version that batched writes. There, each queued write
 travelled as an `EVAL` whose script ran `HGET` + `HMSET` + `EXPIRE`, so the
