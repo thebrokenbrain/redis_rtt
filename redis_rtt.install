@@ -65,6 +65,39 @@ function _redis_rtt_module_path(): string {
 }
 
 /**
+ * Asks Redis whether it will run a script, with one that does nothing.
+ *
+ * \Drupal\redis_rtt\Redis\Scripting::wasRefused() only answers for scripts
+ * this request happened to send, and the status page sends none: rendering it
+ * invalidates no tag and takes no lock. So the row that exists to tell an
+ * operator the module is degraded said nothing at all - measured against a
+ * Redis with `rename-command EVAL ""`, where every invalidation on the site was
+ * falling back silently and the report stayed green.
+ *
+ * The cost is one round trip, on a page nobody renders in a loop, and only when
+ * a connection already exists for other reasons.
+ *
+ * @param \Drupal\redis\ClientInterface $client
+ *   The connection to ask.
+ *
+ * @return bool
+ *   TRUE if Redis refuses to run scripts.
+ */
+function _redis_rtt_scripting_refused($client): bool {
+  try {
+    Scripting::clearError($client);
+    $reply = $client->eval('return 1', [], 0);
+  }
+  catch (\Throwable $e) {
+    return Scripting::refuses($e);
+  }
+
+  // Only a recognised refusal. A script that failed for its own reason is not
+  // this row's business, and saying so would be worse than saying nothing.
+  return Scripting::refusedReply($client, $reply);
+}
+
+/**
  * Implements hook_requirements().
  *
  * Enabling this module changes nothing on its own: every optimisation is
@@ -257,11 +290,21 @@ function redis_rtt_requirements(string $phase): array {
   // A Redis that will not run Lua degrades this module instead of breaking it,
   // and from outside a degraded site looks exactly like a healthy one: 200s all
   // round, nothing in the log, two savings quietly gone. This row is the only
-  // place it shows. It reports what happened in THIS request, because the flag
-  // does not outlive one - so rendering the status page tells you about the
-  // status page, and the note names how to check it properly.
-  if (Scripting::wasRefused()) {
-    $connection_notes[] = t('Redis refused to run a Lua script during this request, so the two optimisations that depend on scripting - single round-trip cache invalidation and single round-trip lock release - fell back to the same commands the redis module would send. The site works; those two savings do not apply. This usually means scripting is out of the ACL, or <code>EVAL</code> has been renamed. Note that this is reported per request: a page that sends no script will not show it, so check with <code>drush php:eval</code> against a page that invalidates.');
+  // place it shows.
+  //
+  // Asked rather than remembered. The flag does not outlive a request and this
+  // page sends no script of its own, so reading the flag alone reported on the
+  // status page and nothing else: against a Redis with EVAL renamed, the row
+  // stayed green while every invalidation on the site fell back.
+  // @see _redis_rtt_scripting_refused()
+  $refused = Scripting::wasRefused();
+  if (!$refused && $factory instanceof RedisClientFactory && $factory->hasClient()) {
+    $connection_client = $factory->getClient();
+    $refused = !Scripting::unavailable($connection_client)
+      && _redis_rtt_scripting_refused($connection_client);
+  }
+  if ($refused) {
+    $connection_notes[] = t('Redis refuses to run Lua scripts, so the two optimisations that depend on scripting - single round-trip cache invalidation and single round-trip lock release - fall back to the same commands the redis module would send. The site works; those two savings do not apply. This usually means scripting is out of the ACL, or <code>EVAL</code> has been renamed.');
   }
   if ($client !== NULL && !str_starts_with($client, 'PhpRedisRtt')) {
     $connection_notes[] = t('The connection is @client rather than PhpRedisRtt, so this module configures no read timeout and phpredis falls back to the <code>default_socket_timeout</code> of php.ini, currently @stock. A connection dropped by a failover then holds its PHP worker for that long - twice that, in fact, for a request that opens a second connection after the first one fails.', [

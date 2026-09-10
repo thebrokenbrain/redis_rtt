@@ -9,6 +9,7 @@ use Drupal\Core\Extension\ModuleExtensionList;
 use Drupal\Core\Site\Settings;
 use Drupal\Tests\UnitTestCase;
 use Drupal\redis\ClientFactory;
+use Drupal\redis_rtt\Redis\Scripting;
 
 /**
  * The status report has to describe the connection, not the intention.
@@ -50,11 +51,14 @@ class ConnectionRequirementsTest extends UnitTestCase {
    * @param string|null $client
    *   The name of the client the redis factory has already built, or NULL when
    *   nothing has needed a connection yet this request.
+   * @param \Drupal\redis\ClientInterface|null $connected
+   *   The client itself, for the rows that ask it something rather than asking
+   *   about it.
    *
    * @return array<string, mixed>
    *   The connection requirement.
    */
-  protected function connectionRequirement(array $connection, ?string $client): array {
+  protected function connectionRequirement(array $connection, ?string $client, $connected = NULL): array {
     new Settings([
       'cache' => ['default' => 'cache.backend.redis_rtt'],
       'redis.connection' => $connection,
@@ -63,6 +67,9 @@ class ConnectionRequirementsTest extends UnitTestCase {
     $factory = $this->createMock(ClientFactory::class);
     $factory->method('hasClient')->willReturn($client !== NULL);
     $factory->method('getClientName')->willReturn($client);
+    if ($connected !== NULL) {
+      $factory->method('getClient')->willReturn($connected);
+    }
 
     $container = new ContainerBuilder();
     $container->set('string_translation', $this->getStringTranslationStub());
@@ -292,6 +299,70 @@ class ConnectionRequirementsTest extends UnitTestCase {
       DRUPAL_ROOT . '/' . $m[1],
       'The path the operator is told to paste has to name a file that is there.'
     );
+  }
+
+  /**
+   * A Redis that refuses scripts shows up on the status report.
+   *
+   * The row is the only place a degraded module is visible at all: everything
+   * still answers 200 and nothing reaches the log. Reading the request-scoped
+   * flag was not enough to make it appear, because rendering this page sends no
+   * script - measured against a Redis with EVAL renamed, where the row stayed
+   * green while every invalidation on the site was falling back. So the
+   * question is put to Redis here.
+   *
+   * @covers ::redis_rtt_requirements
+   * @covers ::_redis_rtt_scripting_refused
+   */
+  public function testScriptRefusalReachesTheStatusReport(): void {
+    Scripting::reset();
+    $client = new ScriptFailingClient(new FakeRedisClient());
+
+    $row = $this->connectionRequirement(['persistent' => TRUE], 'PhpRedisRtt', $client);
+
+    $this->assertSame(1, $client->scriptAttempts, 'The row has to ask, not wait to be told.');
+    $this->assertSame(REQUIREMENT_WARNING, $row['severity'], 'A degraded module is a problem worth a colour.');
+    $this->assertStringContainsString('refuses to run Lua scripts', $this->text($row));
+  }
+
+  /**
+   * And a Redis that runs them does not.
+   *
+   * The control: without it, a row wired to warn about everything would pass
+   * the test above.
+   *
+   * @covers ::redis_rtt_requirements
+   */
+  public function testWorkingRedisSaysNothingAboutScripts(): void {
+    Scripting::reset();
+    $client = new ScriptFailingClient(new FakeRedisClient());
+    $client->failScripts = FALSE;
+
+    $row = $this->connectionRequirement(['persistent' => TRUE], 'PhpRedisRtt', $client);
+
+    $this->assertSame(1, $client->scriptAttempts, 'It still asks.');
+    $this->assertSame(REQUIREMENT_OK, $row['severity']);
+    $this->assertStringNotContainsString('refuses to run Lua scripts', $this->text($row));
+  }
+
+  /**
+   * A script that failed on its own merits is not a refusal.
+   *
+   * Saying "Redis refuses to run Lua" because one script hit a WRONGTYPE would
+   * send an operator to reconfigure an ACL that was never the problem.
+   *
+   * @covers ::_redis_rtt_scripting_refused
+   */
+  public function testAnUnrecognisedScriptFailureIsNotReportedAsRefusal(): void {
+    Scripting::reset();
+    $client = new ScriptFailingClient(
+      new FakeRedisClient(),
+      'WRONGTYPE Operation against a key holding the wrong kind of value'
+    );
+
+    $row = $this->connectionRequirement(['persistent' => TRUE], 'PhpRedisRtt', $client);
+
+    $this->assertStringNotContainsString('refuses to run Lua scripts', $this->text($row));
   }
 
   /**
