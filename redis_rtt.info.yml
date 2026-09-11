@@ -2,6 +2,6 @@ name: 'Redis RTT optimizer'
 type: module
 description: 'Cuts the number of Redis round trips per request, for deployments where the cache is a network hop away.'
 package: Performance
-core_version_requirement: ^10.3 || ^11
+core_version_requirement: ^10.3 || ^11.4
 dependencies:
   - redis:redis

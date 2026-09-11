@@ -282,32 +282,86 @@ class PreloadingRedisCacheTagsChecksumTest extends UnitTestCase {
   }
 
   /**
-   * The registered tags must be a list, which is what core 11.2 merges.
+   * Registered tags go on this class's own list, and core's stays empty.
    *
-   * From 11.2 the $preloadTags property belongs to core's
-   * CacheTagsChecksumTrait, whose ::calculateChecksum() folds it into the tag
-   * list. A set survives that fold as its boolean values, and TRUE then reads
-   * as the tag "1" - requested from Redis on every lookup and, through
-   * ::learn(), written into the warm set forever. There is no Drupal 11.2 to
-   * run this against here, so the assertion is on the shape of the property and
-   * on what core does with it.
+   * From 11 the $preloadTags property belongs to core's CacheTagsChecksumTrait,
+   * which runs a preload of its own on it: ::calculateChecksum() drains it and
+   * hands the drained tags to ::getTagInvalidationCounts() mixed in with the
+   * ones the caller asked for, then puts everything that comes back into the
+   * static tag cache. A count fetched on spec would be authoritative for the
+   * rest of the process that way, past the window this class bounds it with -
+   * measured on core 11.4.6, with $settings['redis_rtt_tag_warmset_ttl'] at 0
+   * and a tag another process had invalidated still answering with the old
+   * count.
+   *
+   * So the two lists are kept apart. Core's has to be empty, because that is
+   * what switches its preload off, and this class's has to be a list of names:
+   * a set survives an array_merge() as its boolean values, and TRUE then reads
+   * as the tag "1", requested from Redis on every lookup and written into the
+   * warm set for ever by ::learn().
    *
    * @covers ::registerCacheTagsForPreload
    */
-  public function testRegisteredTagsKeepTheShapeCoreExpects(): void {
+  public function testRegisteredTagsGoOnThisClassesOwnList(): void {
     $provider = $this->provider();
     $provider->registerCacheTagsForPreload(['node:1', 'node:2']);
 
-    $property = new \ReflectionProperty(PreloadingRedisCacheTagsChecksum::class, 'preloadTags');
-    $preload = $property->getValue($provider);
-    $this->assertSame(['node:1', 'node:2'], $preload);
-
-    // Verbatim from CacheTagsChecksumTrait::calculateChecksum() in 11.2.
-    $tags_with_preload = array_unique(array_merge(['config:system.site'], $preload));
+    $own = new \ReflectionProperty(PreloadingRedisCacheTagsChecksum::class, 'pendingPreload');
     $this->assertSame(
-      ['config:system.site', 'node:1', 'node:2'],
-      array_values($tags_with_preload),
-      'Core must end up with tag names only, and no stray boolean.',
+      ['node:1', 'node:2'],
+      $own->getValue($provider),
+      'Tag names only, as a list: a set would put a stray boolean in the next array_merge().'
+    );
+
+    $core = new \ReflectionProperty(PreloadingRedisCacheTagsChecksum::class, 'preloadTags');
+    $this->assertSame(
+      [],
+      $core->getValue($provider),
+      "Core's own preload list has to stay empty: a tag in it is a tag fetched past this class's window."
+    );
+  }
+
+  /**
+   * Core's own preload is switched off, not merely left unused.
+   *
+   * Nothing in this class fills the inherited property, so on a correct build
+   * it is empty anyway and the line that empties it changes nothing. It is
+   * there for the case that stops being true: a future core, or a subclass,
+   * putting something in it. What core does with a tag it finds there is take
+   * the count on spec and make it authoritative for the rest of the process,
+   * which is the one thing the window exists to prevent.
+   *
+   * The property is filled by reflection because that is the only way to reach
+   * the state from here. Note this test can only discriminate on core 11 and
+   * later: before that the trait has no preload of its own and the property is
+   * this class's alone.
+   *
+   * @covers ::calculateChecksum
+   */
+  public function testCoresOwnPreloadIsSwitchedOff(): void {
+    new Settings([
+      'redis_rtt_tag_warmset_min_hits' => 2,
+      // Any speculative count is stale the moment it is asked for.
+      'redis_rtt_tag_warmset_ttl' => 0.0,
+      'cache_prefix' => 'drupal',
+    ]);
+    $key = 'drupal:cachetags:node:1';
+    $this->client->data[$key] = 3;
+    $this->client->data['drupal:cachetags:node:2'] = 1;
+
+    $provider = $this->provider();
+    // As if core - or anything else - had registered a tag on its list.
+    $inherited = new \ReflectionProperty(PreloadingRedisCacheTagsChecksum::class, 'preloadTags');
+    $inherited->setValue($provider, ['node:1']);
+    $provider->getCurrentChecksum(['node:2']);
+
+    // Another process invalidates node:1 while this one is still running.
+    $this->client->data[$key] = 4;
+
+    $this->assertSame(
+      4,
+      (int) $provider->getCurrentChecksum(['node:1']),
+      "A tag on core's preload list must not become authoritative behind this class's back.",
     );
   }
 

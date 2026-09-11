@@ -64,6 +64,30 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
   protected array $preloadTags = [];
 
   /**
+   * The tags this class is going to preload, kept apart from ::$preloadTags.
+   *
+   * Core 11 grew a preload of its own on the same property name, and the two
+   * cannot share it. Its ::calculateChecksum() drains ::$preloadTags and hands
+   * the drained tags to ::getTagInvalidationCounts() mixed in with the ones the
+   * caller actually asked for, then puts everything that comes back into the
+   * static tag cache. A count fetched on spec would become authoritative for
+   * the rest of the process that way, which is exactly what the window below
+   * exists to prevent: measured on core 11.4.6, a tag another process had
+   * invalidated went on answering with the old count and
+   * $settings['redis_rtt_tag_warmset_ttl'] bounded nothing, 0 included.
+   *
+   * So this class keeps its own list here and leaves ::$preloadTags empty,
+   * which switches core's preload off - it is guarded by `if
+   * ($this->preloadTags)` - and leaves the speculation entirely to this class,
+   * on every supported core. The inherited property stays declared because the
+   * trait declares it on 11 and does not on 10, and this class has to be
+   * loadable on both.
+   *
+   * @var string[]
+   */
+  protected array $pendingPreload = [];
+
+  /**
    * Every tag whose checksum this request asked for, as a set.
    *
    * @var array<string, true>
@@ -235,10 +259,10 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
       $cache_tags,
       $this->delayedTags,
       array_keys($this->tagCache),
-      $this->preloadTags,
+      $this->pendingPreload,
     );
     if ($preloadable_tags) {
-      $this->preloadTags = array_merge($this->preloadTags, $preloadable_tags);
+      $this->pendingPreload = array_merge($this->pendingPreload, $preloadable_tags);
     }
   }
 
@@ -297,8 +321,8 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
     // still covers the learned set on every version. Tags that were genuinely
     // asked for are left alone: dropping one would make the caller record a
     // zero for it instead.
-    $extra = array_unique(array_diff($this->preloadTags, $requested, $known, $this->delayedTags));
-    $this->preloadTags = [];
+    $extra = array_unique(array_diff($this->pendingPreload, $requested, $known, $this->delayedTags));
+    $this->pendingPreload = [];
 
     // The first lookup of the request carries the whole learned set along.
     // Later lookups do not, because by then most of it is in the static cache
@@ -430,6 +454,14 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
    */
   protected function calculateChecksum(array $tags) {
     $this->answeredSpeculatively = [];
+    // Core 11's own preload is switched off here rather than left to chance.
+    // It is guarded by `if ($this->preloadTags)`, and anything it drained would
+    // reach ::getTagInvalidationCounts() indistinguishable from a tag the
+    // caller asked for - which is to say, straight into the static tag cache,
+    // past the window. Nothing fills this property on any version; emptying it
+    // is what makes that true rather than assumed.
+    // @see ::$pendingPreload
+    $this->preloadTags = [];
     $checksum = parent::calculateChecksum($tags);
 
     // Taken into a local and cleared in one step: the property is filled from
@@ -450,6 +482,7 @@ class PreloadingRedisCacheTagsChecksum extends RedisCacheTagsChecksum {
   public function reset(): void {
     parent::reset();
     $this->preloadTags = [];
+    $this->pendingPreload = [];
     $this->speculative = [];
     $this->answeredSpeculatively = [];
     $this->warmSetUsed = FALSE;
