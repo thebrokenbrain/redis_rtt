@@ -1,0 +1,38 @@
+{
+    "name": "drupal/redis_rtt",
+    "description": "Cuts the number of Redis round trips per request, for deployments where the cache is a network hop away.",
+    "type": "drupal-module",
+    "license": "GPL-2.0-or-later",
+    "homepage": "https://www.drupal.org/project/redis_rtt",
+    "authors": [
+        {
+            "name": "thebrokenbrain",
+            "homepage": "https://www.drupal.org/u/thebrokenbrain",
+            "role": "Maintainer"
+        }
+    ],
+    "support": {
+        "issues": "https://www.drupal.org/project/issues/redis_rtt",
+        "source": "https://git.drupalcode.org/project/redis_rtt"
+    },
+    "require": {
+        "php": ">=8.1",
+        "drupal/core": "^10.3 || ^11.4",
+        "drupal/redis": "^2.0@alpha"
+    },
+    "require-dev": {
+        "drupal/coder": "^8.3",
+        "mglaman/phpstan-drupal": "^1.2 || ^2",
+        "phpstan/phpstan": "^1.12 || ^2",
+        "phpstan/phpstan-deprecation-rules": "^1.1 || ^2"
+    },
+    "suggest": {
+        "ext-apcu": "Strongly recommended. The render cache redirect shortcut and the cache tag warm set fall back to per-request memory without it, which is correct but saves nothing between requests.",
+        "ext-redis": "Needed for the PhpRedisRtt client this module configures, and for CountingPhpRedis. Suggested rather than required because the redis module's Predis client also works without it, minus the two optimisations that depend on Lua."
+    },
+    "autoload": {
+        "psr-4": {
+            "Drupal\\redis_rtt\\": "src/"
+        }
+    }
+}

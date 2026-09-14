@@ -1,0 +1,329 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Drupal\redis_rtt\Cache;
+
+use Drupal\Core\Cache\CacheBackendInterface;
+use Drupal\redis\Cache\RedisBackend;
+use Drupal\redis_rtt\Redis\Pipeline;
+use Drupal\redis_rtt\Redis\Scripting;
+
+/**
+ * Redis cache backend tuned for high round-trip-cost topologies.
+ *
+ * Every difference from \Drupal\redis\Cache\RedisBackend is about fitting more
+ * work into fewer network waits.
+ *
+ * 1. The "last delete all" marker is fetched inside the same pipeline as the
+ *    first read of the bin instead of costing its own round trip. Stock
+ *    behaviour spends one extra GET per bin per request the first time an entry
+ *    of that bin is expanded.
+ *
+ * 2. ::invalidateMultiple() costs one round trip instead of two per cache ID.
+ *    Stock behaviour issues a sequential HGET followed by a sequential HSET for
+ *    every single cache ID, un-pipelined. This is hit hard by CacheCollector,
+ *    which invalidates its cache entry on every ::set().
+ *
+ * 3. The cache tags of everything a read returns are handed to the checksum
+ *    provider before any single entry is validated, so it can resolve them all
+ *    in one MGET rather than one GET per tag.
+ *
+ * 4. The double-prefixing bug in the stock ::setMultiple() expired-item path is
+ *    fixed (it passes an already-prefixed key to ::delete(), which prefixes it
+ *    again and deletes a key that cannot exist).
+ *
+ *
+ * Writes go to Redis at exactly the point the stock backend sends them. An
+ * earlier version of this class held them in memory and sent them in batches,
+ * which was the largest single saving it made and also the only part of it that
+ * could be wrong: a queued write that another process deleted in the meantime
+ * was recreated by the flush, because Redis cannot tell "deleted" from "never
+ * existed". That was bounded to three bins by a list of four conditions and
+ * never reproduced outside a deliberately misconfigured one - but it was the
+ * only thing here that had to be reasoned about rather than simply read, and it
+ * is gone. What it cost to remove is measured in README.md: nothing at all on a
+ * warm page, and about two thirds of the saving on a cold one.
+ */
+class PipeliningRedisBackend extends RedisBackend {
+
+  /**
+   * Invalidates a cache entry only if it exists and is currently valid.
+   *
+   * Mirrors the stock backend's semantics exactly: HGET returns FALSE for a
+   * missing key or missing field, and the stock PHP check treats the string
+   * '0' as falsy, so an already-invalid entry is not rewritten.
+   *
+   * Declared with exactly one key so it stays correct if the deployment ever
+   * moves to a cluster-mode Redis.
+   */
+  protected const INVALIDATE_LUA = <<<'LUA'
+local v = redis.call('HGET', KEYS[1], 'valid')
+if v and v ~= '0' and v ~= '' then
+  redis.call('HSET', KEYS[1], 'valid', 0)
+  return 1
+end
+return 0
+LUA;
+
+  /**
+   * {@inheritdoc}
+   *
+   * @param string[] $cids
+   *   The cache IDs to fetch; those found are removed from the list.
+   * @param bool $allow_invalid
+   *   Whether to return entries invalidated by a cache tag.
+   *
+   * @return object[]
+   *   The cache items, keyed by cache ID.
+   */
+  public function getMultiple(&$cids, $allow_invalid = FALSE) {
+    if (empty($cids)) {
+      return [];
+    }
+
+    $keys = [];
+    foreach ($cids as $cid) {
+      $keys[$cid] = $this->getKey($cid);
+    }
+
+    $rows = [];
+
+    // Piggyback the "last delete all" marker on the read pipeline. The stock
+    // backend fetches it lazily from ::expandEntry(), which costs a separate
+    // round trip per bin.
+    $needs_last_delete = $this->lastDeleteAll === NULL;
+    $expected = count($keys) + ($needs_last_delete ? 1 : 0);
+
+    // Always at least one key here: an empty $cids returned above.
+    try {
+      $this->client->pipeline();
+      foreach ($keys as $key) {
+        $this->client->hgetall($key);
+      }
+      if ($needs_last_delete) {
+        $this->client->get($this->getKey(static::LAST_DELETE_ALL_KEY));
+      }
+      $replies = $this->client->exec();
+    }
+    catch (\Exception $e) {
+      // The hottest pipeline in the module, and it used to be the only one
+      // without this. See Pipeline::discard().
+      Pipeline::discard($this->client);
+      throw $e;
+    }
+
+    // Reading a timestamp out of a reply set that is not what was asked for is
+    // how the marker silently became 0.0 or 1.0 - both of them 1970, both of
+    // them meaning "this bin was never emptied", which would serve entries a
+    // flush was supposed to have retired. An absent marker legitimately means
+    // that; a reply set that did not come back whole means nothing at all.
+    //
+    // Three rounds of measuring have narrowed what "not whole" can actually be,
+    // and the honest answer is that neither check below defends against the
+    // shape a real desynchronised socket produces. ::exec() does answer FALSE
+    // instead of raising for several connection states, and that is real. A set
+    // *shorter* than the queue does not happen: phpredis 6.3.0 raises, or dies
+    // with a SIGSEGV, but never answers short. Nor does a *longer* one: with a
+    // queue genuinely dragged in from earlier on the socket, measured through a
+    // TCP proxy, phpredis and Relay both read exactly as many replies as
+    // commands were queued and the leftover arrives at the front.
+    //
+    // What that leaves is the right length with everything one position late,
+    // and what happens then depends on the client. On Relay 0.40.0 the shift
+    // does put an HGETALL's array where the timestamp belongs and is_scalar()
+    // refuses it. On phpredis 6.3.0 - the client this module configures and
+    // recommends - it does not: the parser desynchronises too, and the last
+    // slot comes back as a raw protocol fragment, the string "*14", which is
+    // scalar. Measured with four kinds of leftover; all four behaved the same.
+    // So the marker is read as (float) "*14" = 0.0, which is the 1970 this
+    // whole comment is about, and neither the count nor is_scalar() stops it.
+    //
+    // What refuses that shape is the is_numeric() below, put there for it.
+    // A marker Redis wrote is a timestamp with a decimal point, so it is always
+    // numeric; a protocol fragment never is, and neither is an HGETALL's array.
+    // The one non-numeric answer that is legitimate is the absent marker, FALSE
+    // or NULL, which is the ordinary state of a bin nobody has ever flushed -
+    // it is let through by name, because refusing it would send the inherited
+    // lazy GET on every read of every such bin, which is a round trip per
+    // request to defend against nothing.
+    //
+    // This is stricter than \Drupal\redis\Cache\RedisBackend, whose
+    // getLastDeleteAll() casts whatever its own GET returns and reaches the
+    // 1970 by another route on the same socket. Being stricter than the twin is
+    // not something this module goes looking for; here it costs one comparison.
+    //
+    // The count check stays because it is free and because it does catch the
+    // shape it names, a marker that never came back at all.
+    $replies = is_array($replies) ? $replies : [];
+    $intact = count($replies) === $expected;
+
+    // Held apart from the value, because NULL is a legitimate answer from a
+    // client that reports a missing key that way and is also what "the reply
+    // set was not whole, so there is nothing to read" looks like. Conflating
+    // the two adopted 0.0 - 1970 - out of a set that had already been refused.
+    $have_marker = FALSE;
+    $marker = NULL;
+    if ($needs_last_delete && $intact) {
+      // The marker is the last reply in the pipeline.
+      $marker = array_pop($replies);
+      $have_marker = TRUE;
+    }
+
+    foreach ($replies as $values) {
+      // A miss answers with an empty array. Anything that is not an array is
+      // the marker, left in place because the reply set was not whole.
+      if (is_array($values) && $values) {
+        $rows[] = $values;
+      }
+    }
+
+    // Adopted only when there is something to judge with it. The stock backend
+    // fetches this lazily from ::expandEntry(), which never runs without rows,
+    // so on a pure miss it holds no opinion and sees a deleteAll() that arrives
+    // afterwards. Taking the marker there anyway made this module blind to that
+    // flush for the rest of the request, which is a difference from stock that
+    // buys nothing: with no rows there was no round trip to save.
+    // A marker Redis wrote is numeric. An absent one - FALSE, or NULL from a
+    // client that answers that way - is the honest "never flushed". Anything
+    // else came from somewhere this pipeline did not ask.
+    $usable = $have_marker
+      && ($marker === FALSE || $marker === NULL || is_numeric($marker));
+    if ($needs_last_delete && $rows !== [] && $usable) {
+      $this->lastDeleteAll = (float) $marker;
+    }
+
+    // Register every returned tag for preloading before validating any single
+    // item, so the checksum provider can resolve them all in one MGET rather
+    // than one MGET per item.
+    if (method_exists($this->checksumProvider, 'registerCacheTagsForPreload')) {
+      $tags_for_preload = [];
+      foreach ($rows as $values) {
+        if (!empty($values['tags'])) {
+          $tags_for_preload[] = explode(' ', $values['tags']);
+        }
+      }
+      if ($tags_for_preload) {
+        $this->checksumProvider->registerCacheTagsForPreload(array_merge(...$tags_for_preload));
+      }
+    }
+
+    $return = [];
+    foreach ($rows as $values) {
+      if ($item = $this->expandEntry($values, $allow_invalid)) {
+        $return[$item->cid] = $item;
+      }
+    }
+
+    $cids = array_diff($cids, array_keys($return));
+
+    return $return;
+  }
+
+  /**
+   * {@inheritdoc}
+   *
+   * Two changes over the stock method. Already-expired items are routed through
+   * ::deleteMultiple() with their raw cache IDs - the stock method hands it an
+   * already-prefixed key, which ::deleteMultiple() prefixes a second time, so
+   * the entry it means to remove is never touched and stays in Redis until it
+   * expires on its own. And, for bins the batch handles, the entries are queued
+   * instead of sent.
+   *
+   * @param array<string, array{data: mixed, expire?: int, tags?: string[]}> $items
+   *   The items to write, keyed by cache ID.
+   */
+  public function setMultiple(array $items): void {
+    $expired = [];
+    foreach ($items as $cid => $item) {
+      $ttl = $this->getExpiration($item['expire'] ?? CacheBackendInterface::CACHE_PERMANENT);
+      if ($ttl !== NULL && $ttl <= 0) {
+        $expired[] = $cid;
+        unset($items[$cid]);
+      }
+    }
+
+    if ($expired) {
+      $this->deleteMultiple($expired);
+    }
+    if (!$items) {
+      return;
+    }
+
+    // A write supersedes a delete that has not happened yet. Inside a database
+    // transaction ::deleteMultiple() defers the delete to the commit and, until
+    // then, ::expandEntry() refuses to serve any cache ID on that list. So
+    // writing an already-expired entry and then writing the same cache ID
+    // properly - which is what a hook that caches "until an hour after the last
+    // change" does inside an entity save - left the good value unreadable for
+    // the rest of the transaction and deleted at commit.
+    //
+    // The stock backend never hits this, but only by accident: it queues the
+    // already-prefixed key, which ::deleteMultiple() prefixes again, so the
+    // entry it means to remove is never touched and never matches. Fixing that
+    // double prefix is what exposed the deferral underneath it.
+    if ($this->delayedDeletions) {
+      $this->delayedDeletions = array_values(array_diff($this->delayedDeletions, array_keys($items)));
+    }
+
+    parent::setMultiple($items);
+  }
+
+  /**
+   * {@inheritdoc}
+   *
+   * @param string[] $cids
+   *   The cache IDs to invalidate.
+   */
+  public function invalidateMultiple(array $cids): void {
+    if (!$cids) {
+      return;
+    }
+
+    // Redis has already refused to run scripts on this connection, so do not
+    // ask again: the inherited path sends what stock would have sent.
+    if (Scripting::unavailable($this->client)) {
+      parent::invalidateMultiple($cids);
+      return;
+    }
+
+    // One round trip for the whole set, instead of a sequential HGET + HSET per
+    // cache ID.
+    try {
+      Scripting::clearError($this->client);
+      $this->client->pipeline();
+      foreach ($cids as $cid) {
+        $this->client->eval(static::INVALIDATE_LUA, [$this->getKey($cid)], 1);
+      }
+      $replies = $this->client->exec();
+    }
+    catch (\Exception $e) {
+      // A pipeline of scripts that times out mid-flight leaves the connection
+      // reading the previous command's replies. See Pipeline::discard().
+      Pipeline::discard($this->client);
+      // A Redis with scripting switched off must not take the site down. Fall
+      // back to what this class inherits, which is what stock does.
+      if (Scripting::refuses($e)) {
+        Scripting::markRefused();
+        parent::invalidateMultiple($cids);
+        return;
+      }
+      throw $e;
+    }
+
+    // Most rejections never raise: they come back as FALSE. INVALIDATE_LUA
+    // answers 0 or 1 and nothing else, so a FALSE here means the entries were
+    // not invalidated - and that has to be answered by invalidating them the
+    // inherited way, whether or not the reason is one this module recognises.
+    // Doing nothing was the silent failure: the page kept serving 200 while
+    // retired content stayed valid. The connection is still usable after a
+    // rejected command, so there is nothing to discard.
+    if (Scripting::failedReply($replies)) {
+      if (Scripting::refusedReply($this->client, $replies)) {
+        Scripting::markRefused();
+      }
+      parent::invalidateMultiple($cids);
+    }
+  }
+
+}

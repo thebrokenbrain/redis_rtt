@@ -1,0 +1,79 @@
+# Assumes phpstan/extension-installer, which is what drupal/core-dev pulls in
+# and what the GitLab CI templates use, so phpstan-drupal and the deprecation
+# rules register themselves. Adding them under `includes` on top of that makes
+# PHPStan complain about duplicate includes.
+parameters:
+    level: 6
+    paths:
+        - .
+    excludePaths:
+        - vendor/*
+    ignoreErrors:
+        # \Drupal\redis\ClientInterface is a __call() facade over phpredis:
+        # every Redis command is a magic method, and no amount of annotation
+        # makes them statically resolvable. The redis module itself has the
+        # same situation.
+        #
+        # Named one by one rather than left open. Open, this covered any Redis
+        # command at all: renaming hgetall to hgetallx still produced "No
+        # errors", so the one check that could catch a mistyped command was
+        # answering for every possible one. Adding a command to the module means
+        # adding it here, and that is the point: the analyser is then the thing
+        # that notices a typo.
+        #
+        # Each list is the minimum that silences a real error, not the module's
+        # whole vocabulary - which is what the comment used to claim. Measured
+        # by removing each name and re-running, in both PHPStan 1.12 and 2.2,
+        # from a base verified clean first.
+        #
+        # "Load-bearing" is per version, and the two do not agree: ttl is
+        # needed by 1.12 and not by 2.2, which does not look inside the call
+        # site that makes it. A name that only one version needs stays, and can:
+        # reportUnmatchedIgnoredErrors is on - it is on by default and this file
+        # does not turn it off - but it fires for an entry that matches nothing,
+        # not for one unused name inside an entry's alternation. Do not prune by
+        # measuring against one version only; removing ttl on 2.2's word alone
+        # breaks 1.12 with two errors, one per ->ttl() call in the tree.
+        -
+            identifier: method.notFound
+            message: '#Call to an undefined method Drupal\\redis\\ClientInterface::(blpop|clearLastError|close|eval|exec|get|getLastError|getOption|hgetall|mget|multi|pipeline|select|ttl)\(\)#'
+        # CountingClient is the same facade with a counter around it: it
+        # implements that interface and forwards through its own __call().
+        # This used to be routed into the rule above by annotating the local
+        # variable as the interface, which PHPStan 2 rejects as widening a
+        # narrower native type - and which hid what was really silenced.
+        -
+            identifier: method.notFound
+            message: '#Call to an undefined method Drupal\\redis_rtt\\Client\\CountingClient::(clearLastError|close|get|getLastError)\(\)#'
+        # LuaRedisLockTest::register() swaps the 'lock' service for this
+        # module's backend, which is the whole point of the test. Static
+        # analysis reads the type off core's default service definition and
+        # concludes the assertion can never pass; at runtime it is the only
+        # thing that can. Asserting it is worth more than the analyser's
+        # opinion of it: without this assertion the class would silently go on
+        # testing core's database lock if the factory wiring ever broke.
+        #
+        # Matched on the message, not just the identifier and the file. Scoped
+        # to the file alone it hid any other impossible-type error in the class:
+        # verified by injecting one, which PHPStan then reported as no error at
+        # all. A silence that wide is not a silence about a known false
+        # positive, it is a silence about a file.
+        -
+            identifier: method.impossibleType
+            path: tests/src/Kernel/LuaRedisLockTest.php
+            count: 1
+        # ::calculateChecksum() empties $answeredSpeculatively, calls the parent,
+        # and reads it back: the parent is what fills it, through
+        # ::getTagInvalidationCounts(). The analyser does not follow a callback
+        # into an overridden method, so it concludes the array is still the empty
+        # one it was assigned two lines earlier.
+        #
+        # Pinned to the one line, for the same reason as above and with more at
+        # stake: this is the file the behaviour change lives in, and scoped to
+        # the whole file the silence also covered a genuine empty-array foreach
+        # injected into ::learn() - PHPStan reported "No errors" with a real bug
+        # in it.
+        -
+            identifier: foreach.emptyArray
+            path: src/Cache/PreloadingRedisCacheTagsChecksum.php
+            count: 1

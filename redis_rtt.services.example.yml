@@ -1,0 +1,64 @@
+# Service overrides for the Redis RTT optimizer.
+#
+# These replace core and redis services, so they have to be loaded through
+# settings.php rather than the module's own services.yml:
+#
+#   $settings['container_yamls'][] = 'modules/contrib/redis_rtt/redis_rtt.services.example.yml';
+#
+# Load this AFTER redis' own example.services.yml if you use that one - the
+# entries here supersede it and it must not win the override race.
+#
+# Every block is independent. Comment out anything you do not want yet; the
+# recommended rollout order is documented in README.md.
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # 1. Cache tag checksums resolved in one MGET instead of one per tag group.
+  #
+  # Replaces the redis module's RedisCacheTagsChecksum. It batches lookups that
+  # were going to happen anyway, and it also speculates: tags this request has
+  # not asked for yet, but that requests like it usually check, ride along in
+  # the same MGET. A tag whose invalidation is waiting on an open database
+  # transaction is deliberately excluded from that speculation - fetching its
+  # pre-invalidation count would pin it in the static cache for the rest of the
+  # process, and that is how stale content gets served as fresh.
+  # ---------------------------------------------------------------------------
+  cache_tags.invalidator.checksum:
+    class: Drupal\redis_rtt\Cache\PreloadingRedisCacheTagsChecksum
+    arguments: ['@redis.factory']
+    tags:
+      - { name: cache_tags_invalidator }
+
+  # ---------------------------------------------------------------------------
+  # 2. Locks with single-round-trip release and extend.
+  #
+  # Replaces the redis module's RedisLock with the standard Lua
+  # compare-and-swap. Its WATCH/GET/MULTI/EXEC release costs five round trips,
+  # not three: phpredis sends each command inside a MULTI block and reads back
+  # +QUEUED, so the block is one wait per command rather than one in total.
+  # ---------------------------------------------------------------------------
+  lock:
+    class: Drupal\Core\Lock\LockBackendInterface
+    factory: ['@redis_rtt.lock.factory', get]
+
+  lock.persistent:
+    class: Drupal\Core\Lock\LockBackendInterface
+    factory: ['@redis_rtt.lock.factory', get]
+    arguments: [true]
+
+  # ---------------------------------------------------------------------------
+  # 3. Render / Dynamic Page Cache / access policy lookups that skip the cache
+  #    redirect hop on a hit.
+  #
+  # How much this is worth depends entirely on how deep the redirect chains are,
+  # which depends on how many cache contexts the site's elements vary by. On a
+  # site with 100 heavy nodes and six users it was measured at 0 round trips out
+  # of 13 on a warm node view and 4 out of 37 on a node edit form - the cache tag
+  # checksums are what carry that site. Measure yours with
+  # $settings['redis_rtt_redirect_shortcut'] = FALSE, which disables it at
+  # runtime without editing this file.
+  # ---------------------------------------------------------------------------
+  variation_cache_factory:
+    class: Drupal\redis_rtt\Cache\RedirectShortcutVariationCacheFactory
+    arguments: ['@request_stack', '@cache_factory', '@cache_contexts_manager']
