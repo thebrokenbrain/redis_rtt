@@ -19,18 +19,47 @@ variables:
   _AUTORUN_PREVIOUS_MINOR: 'all'
   OPT_IN_TEST_PREVIOUS_MAJOR: '1'
   _AUTORUN_PREVIOUS_MAJOR: 'all'
-  # Drupal 12 is deliberately outside the declared range. The next major job
-  # installs it anyway and is allowed to fail, so it is early warning rather
-  # than a gate. redis has to be listed for the lenient plugin or the
+  # Drupal 12 is deliberately outside the declared range. Its phpunit job is
+  # allowed to fail, so it is early warning rather than a gate; its composer
+  # job is not, which is why require-dev accepts the coder 9 that Drupal 12's
+  # core-dev asks for. redis has to be listed for the lenient plugin or the
   # dependency blocks the install before this module is even reached.
   OPT_IN_TEST_NEXT_MAJOR: '1'
   _AUTORUN_NEXT_MAJOR: 'all'
   _LENIENT_ALLOW_LIST: 'redis'
-  # The unit tests are the ones that run everywhere. The kernel tests need a
-  # reachable Redis and skip themselves without one.
+  # Both suites need the phpredis extension - several unit tests use its
+  # classes - and the kernel tests also need a reachable Redis: they skip when
+  # REDIS_HOST and REDIS_PORT are unset, and fail when they are set and nothing
+  # answers there.
   _PHPUNIT_EXTRA: '--group redis_rtt'
 
 phpunit:
+  # The drupalci images do not load phpredis, and without it the kernel tests
+  # and eight unit tests die on Class "Redis" not found. The ubuntu-apache
+  # images ship redis.so, built against msgpack, without enabling either. The
+  # php-8.1-apache image of the previous major job ships neither redis.so nor a
+  # compiler, and its bullseye-security source answers 404 for the headers, so
+  # it builds the extension from the snapshot sources the image carries
+  # commented out. The job fails if none of that loaded the extension.
+  before_script:
+    - |
+      if php -r 'exit(extension_loaded("redis") ? 0 : 1);'; then
+        echo "phpredis is already loaded"
+      else
+        EXT_DIR=$(php -r 'echo ini_get("extension_dir");')
+        if [ -f "$EXT_DIR/redis.so" ]; then
+          if [ -f "$EXT_DIR/msgpack.so" ]; then docker-php-ext-enable msgpack; fi
+          docker-php-ext-enable redis
+        else
+          sed -i -e 's|^deb http://deb.debian.org|# deb http://deb.debian.org|' -e 's|^# deb http://snapshot.debian.org|deb http://snapshot.debian.org|' /etc/apt/sources.list
+          apt-get -o Acquire::Check-Valid-Until=false update -qq
+          apt-get -o Acquire::Check-Valid-Until=false install -y -qq --no-install-recommends autoconf gcc make libc6-dev > /dev/null
+          pecl install redis-6.3.0 < /dev/null > /tmp/pecl.log
+          docker-php-ext-enable redis
+        fi
+      fi
+      php -r 'exit(extension_loaded("redis") ? 0 : 1);'
+      php -r 'echo "phpredis ", phpversion("redis"), PHP_EOL;'
   variables:
     # Give the kernel tests a Redis to talk to. Without these they skip, which
     # is a pass but proves nothing.
