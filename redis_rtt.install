@@ -57,10 +57,11 @@ function _redis_rtt_module_path(): string {
     return substr($dir, strlen(DRUPAL_ROOT) + 1);
   }
 
-  // Last resort, and the one line here no test can reach: getting to it needs
-  // either no DRUPAL_ROOT or the file outside it, and the suite always runs
-  // with the module inside a docroot. It is a guess, and it is only ever used
-  // where nothing better can be worked out.
+  // Last resort: getting here needs either no DRUPAL_ROOT or the file outside
+  // it. The suite reaches it on drupal.org's CI, which links the project in
+  // from outside the docroot, and the test for this fallback skips there. It
+  // is a guess, and it is only ever used where nothing better can be worked
+  // out.
   return 'modules/contrib/redis_rtt';
 }
 

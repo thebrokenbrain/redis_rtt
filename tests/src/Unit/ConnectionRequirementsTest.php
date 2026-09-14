@@ -279,6 +279,16 @@ class ConnectionRequirementsTest extends UnitTestCase {
    * @covers ::redis_rtt_requirements
    */
   public function testTheOverridesAdviceFallsBackWithoutTheExtensionList(): void {
+    // The fallback derives the path from where the module's files are, and PHP
+    // resolves symlinks. With the module linked in from outside the docroot -
+    // which is how drupal.org's CI lays a project out - there is no path under
+    // DRUPAL_ROOT to derive, and all the fallback has left is its guess.
+    // Whether that names a real file depends on where the link happens to be,
+    // so it can only be judged where a real answer was possible.
+    if (!str_starts_with(dirname(__DIR__, 3), DRUPAL_ROOT . '/')) {
+      $this->markTestSkipped('The module resolves outside DRUPAL_ROOT, so without the extension list there is no path to derive.');
+    }
+
     new Settings(['cache' => ['default' => 'cache.backend.redis_rtt']]);
     $container = new ContainerBuilder();
     $container->set('string_translation', $this->getStringTranslationStub());
